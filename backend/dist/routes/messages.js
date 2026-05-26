@@ -8,5 +8,6 @@ const MessageController_1 = require("../controllers/MessageController");
 const router = express_1.default.Router();
 router.get('/conversation/:conversationId', MessageController_1.getMessages);
 router.get('/:id', MessageController_1.getMessageById);
+router.patch('/:id/toggle-pin', MessageController_1.togglePinMessage);
 exports.default = router;
 //# sourceMappingURL=messages.js.map

@@ -16,6 +16,41 @@ export function setupSocketIO(httpServer: HttpServer) {
   const orchestrator = Orchestrator.getInstance()
   const agentManager = AgentManager.getInstance()
 
+  async function buildSingleAgentFullContext(conversationId: string, newMessageContent: string): Promise<AgentMessage[]> {
+    const allMessages = await prisma.message.findMany({
+      where: { conversationId },
+      orderBy: { createdAt: 'asc' }
+    })
+
+    const pinnedMessages = allMessages.filter(m => m.isPinned)
+    const recentMessages = allMessages.slice(-50)
+
+    const contextMessages: AgentMessage[] = []
+
+    if (pinnedMessages.length > 0) {
+      const pinnedContextHeader: AgentMessage = {
+        role: 'system',
+        content: `=== 长期上下文（关键消息，用户已固定）===\n${pinnedMessages.map(m => 
+          `[${m.senderType === 'user' ? '用户' : m.senderType === 'agent' ? 'AI' : '系统'}] ${m.content}`
+        ).join('\n\n')}\n============================================`
+      }
+      contextMessages.push(pinnedContextHeader)
+    }
+
+    recentMessages.forEach(m => {
+      const role: 'user' | 'assistant' | 'system' = 
+        m.senderType === 'user' ? 'user' : 
+        m.senderType === 'agent' ? 'assistant' : 'system'
+      
+      contextMessages.push({
+        role,
+        content: m.content
+      })
+    })
+
+    return contextMessages
+  }
+
   io.on('connection', (socket: Socket) => {
     console.log('Client connected:', socket.id)
 
@@ -64,11 +99,10 @@ export function setupSocketIO(httpServer: HttpServer) {
         const runtimeAgent = agentManager.getAgent(singleMember.agent.name)
         if (!runtimeAgent) return
 
-        const messages: AgentMessage[] = [
-          { role: 'user', content: data.content }
-        ]
+        const fullContextMessages: AgentMessage[] = await buildSingleAgentFullContext(data.conversationId, data.content)
+        
         try {
-          const replyContent = await runtimeAgent.normalChat(messages)
+          const replyContent = await runtimeAgent.normalChat(fullContextMessages)
           const agentMessage = await prisma.message.create({
             data: {
               conversationId: data.conversationId,

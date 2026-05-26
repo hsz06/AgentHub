@@ -5,4 +5,6 @@ const router = express.Router()
 
 router.get('/conversation/:conversationId', getMessages)
 router.get('/:id', getMessageById)
-router.
+router.patch('/:id/toggle-pin', togglePinMessage)
+
+export default router

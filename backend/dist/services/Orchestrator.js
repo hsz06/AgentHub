@@ -26,6 +26,37 @@ class Orchestrator {
         }
         return [...new Set(matches)];
     }
+    async buildFullContextMessages(conversationId, newUserMessage) {
+        const allMessages = await prisma_1.default.message.findMany({
+            where: { conversationId },
+            orderBy: { createdAt: 'asc' }
+        });
+        const pinnedMessages = allMessages.filter(m => m.isPinned);
+        const recentMessages = allMessages.slice(-50);
+        const contextMessages = [];
+        if (pinnedMessages.length > 0) {
+            const pinnedContextHeader = {
+                role: 'system',
+                content: `=== 长期上下文（关键消息，用户已固定）===\n${pinnedMessages.map(m => `[${m.senderType === 'user' ? '用户' : m.senderType === 'agent' ? 'AI' : '系统'}] ${m.content}`).join('\n\n')}\n============================================`
+            };
+            contextMessages.push(pinnedContextHeader);
+        }
+        recentMessages.forEach(m => {
+            const role = m.senderType === 'user' ? 'user' :
+                m.senderType === 'agent' ? 'assistant' : 'system';
+            contextMessages.push({
+                role,
+                content: m.content
+            });
+        });
+        if (newUserMessage) {
+            contextMessages.push({
+                role: 'user',
+                content: newUserMessage
+            });
+        }
+        return contextMessages;
+    }
     async analyzeIntent(userMessage, availableAgents) {
         const mentionedIds = this.parseMentionedAgentIds(userMessage);
         const targetAgents = [];
@@ -90,7 +121,8 @@ class Orchestrator {
         };
         this.activeOrchestrations.set(conversationId, state);
         await this.pushStateUpdate(io, conversationId, state);
-        let accumulatedContext = originalUserMessage;
+        const fullHistoryContext = await this.buildFullContextMessages(conversationId);
+        let accumulatedContext = `${fullHistoryContext.map(m => `[${m.role}] ${m.content}`).join('\n\n')}\n\n新请求：${originalUserMessage}`;
         for (let i = 0; i < tasks.length; i++) {
             const task = tasks[i];
             state.currentTaskIndex = i;
@@ -112,9 +144,7 @@ class Orchestrator {
                     task.outputResult = `Agent runtime instance [${agentFromDb.name}] not available`;
                     continue;
                 }
-                const messages = [
-                    { role: 'user', content: accumulatedContext }
-                ];
+                const messages = await this.buildFullContextMessages(conversationId, accumulatedContext);
                 const agentOutput = await runtimeAgent.normalChat(messages);
                 task.status = 'completed';
                 task.outputResult = agentOutput;

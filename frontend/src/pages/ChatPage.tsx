@@ -1,5 +1,5 @@
 import { useState, useEffect } from 'react';
-import { Layout, Avatar, Typography, message, Tabs, Badge } from 'antd';
+import { Layout, Avatar, Typography, message, Tabs, Badge, Button } from 'antd';
 import { CloseOutlined, UserOutlined, TeamOutlined } from '@ant-design/icons';
 import SessionList from '../components/SessionList';
 import MessageFlow from '../components/MessageFlow';
@@ -8,6 +8,7 @@ import NewSessionModal from '../components/NewSessionModal';
 import { Session, Message, Agent } from '../types';
 import dayjs from 'dayjs';
 import { CodeOutlined, RobotOutlined, ThunderboltOutlined } from '@ant-design/icons';
+import { messagesApi } from '../services';
 
 const { Sider, Content } = Layout;
 const { Title } = Typography;
@@ -325,18 +326,22 @@ const ChatPage: React.FC = () => {
     message.success('消息已重新生成！');
   };
 
-  const handleTogglePinMessage = (msgId: string) => {
-    setAllMessages((prev) => {
-      const targetMessages = prev[selectedSessionId || ''] || [];
-      const targetMsg = targetMessages.find(m => m.id === msgId);
-      const newIsPinned = !targetMsg?.isPinned;
-      return {
-        ...prev,
-        [selectedSessionId || '']: targetMessages.map(m => 
-          m.id === msgId ? { ...m, isPinned: newIsPinned } : m
-        ),
-      };
-    });
+  const handleTogglePinMessage = async (msgId: string) => {
+    try {
+      const updatedMsg = await messagesApi.togglePinMessage(msgId);
+      setAllMessages((prev) => {
+        const targetMessages = prev[selectedSessionId || ''] || [];
+        return {
+          ...prev,
+          [selectedSessionId || '']: targetMessages.map(m => 
+            m.id === msgId ? { ...m, isPinned: updatedMsg.isPinned } : m
+          ),
+        };
+      });
+    } catch (err) {
+      console.error('Failed to toggle pin message:', err);
+      message.error('操作失败，请稍后重试');
+    }
   };
 
   const handleApplyDiff = (diffData: any) => {

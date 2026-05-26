@@ -20,4 +20,20 @@ export const getMessageById = async (req: Request, res: Response) => {
   const { id } = req.params
   const message = await prisma.message.findUnique({ where: { id } })
   if (!message) {
-    return res.status(404).json({ error: 'Messag
+    return res.status(404).json({ error: 'Message not found' })
+  }
+  res.json(message)
+}
+
+export const togglePinMessage = async (req: Request, res: Response) => {
+  const { id } = req.params
+  const message = await prisma.message.findUnique({ where: { id } })
+  if (!message) {
+    return res.status(404).json({ error: 'Message not found' })
+  }
+  const updatedMessage = await prisma.message.update({
+    where: { id },
+    data: { isPinned: !message.isPinned }
+  })
+  res.json(updatedMessage)
+}

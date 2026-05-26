@@ -55,6 +55,48 @@ export class Orchestrator {
     return [...new Set(matches)]
   }
 
+  async buildFullContextMessages(conversationId: string, newUserMessage?: string): Promise<Message[]> {
+    const allMessages = await prisma.message.findMany({
+      where: { conversationId },
+      orderBy: { createdAt: 'asc' }
+    })
+
+    const pinnedMessages = allMessages.filter(m => m.isPinned)
+    const recentMessages = allMessages.slice(-50)
+
+    const contextMessages: Message[] = []
+
+    if (pinnedMessages.length > 0) {
+      const pinnedContextHeader: Message = {
+        role: 'system',
+        content: `=== 长期上下文（关键消息，用户已固定）===\n${pinnedMessages.map(m => 
+          `[${m.senderType === 'user' ? '用户' : m.senderType === 'agent' ? 'AI' : '系统'}] ${m.content}`
+        ).join('\n\n')}\n============================================`
+      }
+      contextMessages.push(pinnedContextHeader)
+    }
+
+    recentMessages.forEach(m => {
+      const role: 'user' | 'assistant' | 'system' = 
+        m.senderType === 'user' ? 'user' : 
+        m.senderType === 'agent' ? 'assistant' : 'system'
+      
+      contextMessages.push({
+        role,
+        content: m.content
+      })
+    })
+
+    if (newUserMessage) {
+      contextMessages.push({
+        role: 'user',
+        content: newUserMessage
+      })
+    }
+
+    return contextMessages
+  }
+
   async analyzeIntent(userMessage: string, availableAgents: any[]): Promise<IntentAnalysisResult> {
     const mentionedIds = this.parseMentionedAgentIds(userMessage)
     const targetAgents: string[] = []
@@ -137,7 +179,8 @@ export class Orchestrator {
     this.activeOrchestrations.set(conversationId, state)
     await this.pushStateUpdate(io, conversationId, state)
 
-    let accumulatedContext = originalUserMessage
+    const fullHistoryContext = await this.buildFullContextMessages(conversationId)
+    let accumulatedContext = `${fullHistoryContext.map(m => `[${m.role}] ${m.content}`).join('\n\n')}\n\n新请求：${originalUserMessage}`
 
     for (let i = 0; i < tasks.length; i++) {
       const task = tasks[i]
@@ -163,9 +206,7 @@ export class Orchestrator {
           continue
         }
 
-        const messages: Message[] = [
-          { role: 'user', content: accumulatedContext }
-        ]
+        const messages: Message[] = await this.buildFullContextMessages(conversationId, accumulatedContext)
 
         const agentOutput = await runtimeAgent.normalChat(messages)
         task.status = 'completed'

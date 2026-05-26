@@ -65,3 +65,5 @@ model Message {
   metadata        String   @default("{}")
   isPinned        Boolean  @default(false)
   createdAt       DateTime @default(now())
+  updatedAt       DateTime @updatedAt
+}
