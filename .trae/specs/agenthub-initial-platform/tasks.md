@@ -14,6 +14,7 @@
 
 - [ ] Task 3: 数据库Schema设计与迁移
   - [ ] SubTask 3.1: 设计User、Conversation、Message、Agent等核心表的Prisma Schema
+  - [ ] SubTask 3.1.1: 在User/Agent表中加入加密的专属 API Key 配置字段 (BYOK支持)
   - [ ] SubTask 3.2: 生成初始数据库迁移脚本
   - [ ] SubTask 3.3: 执行迁移创建数据库表结构
   - [ ] SubTask 3.4: 插入几个预置的演示Agent数据
@@ -36,16 +37,16 @@
   - [ ] SubTask 6.3: 实现Agent列表查询接口
   - [ ] SubTask 6.4: 添加全局错误处理与CORS配置
 
-- [ ] Task 7: Socket.io实时消息通信通道
+- [ ] Task 7: Socket.io实时消息通信与流式传输
   - [ ] SubTask 7.1: 配置后端Socket.io服务并集成到Express
-  - [ ] SubTask 7.2: 实现前端Socket.io客户端连接管理
-  - [ ] SubTask 7.3: 实现消息发送与实时推送的事件协议
-  - [ ] SubTask 7.4: 验证前后端Socket.io双向通信正常
+  - [ ] SubTask 7.2: 实现前端Socket.io客户端连接及断线重连机制
+  - [ ] SubTask 7.3: 实现大模型流式输出 (Streaming chunk) 的长链接推送协议
+  - [ ] SubTask 7.4: 验证打字机效果前后台双向通信与渲染正常
 
 - [ ] Task 8: Agent统一适配器抽象层实现
-  - [ ] SubTask 8.1: 定义BaseAgent适配器抽象基类（chat方法、能力标签等接口）
-  - [ ] SubTask 8.2: 实现Agent管理器类（Agent注册、获取、调度）
-  - [ ] SubTask 8.3: 设计Agent配置数据模型（System Prompt、参数等）
+  - [ ] SubTask 8.1: 定义BaseAgent基类，支持流式 (stream) 和非流式调用接口
+  - [ ] SubTask 8.2: 封装全局的错误捕捉（Timeout/Rate Limit）与自动重试机制 (Retry)
+  - [ ] SubTask 8.3: 实现Agent管理器类与特定 Prompt / 上下文截断组装逻辑
 
 - [ ] Task 9: 接入OpenAI GPT系列Agent
   - [ ] SubTask 9.1: 集成OpenAI Node.js SDK
@@ -60,10 +61,10 @@
   - [ ] SubTask 10.4: 测试Claude Agent对话功能正常
 
 - [ ] Task 11: Orchestrator协调器核心逻辑开发
-  - [ ] SubTask 11.1: 实现意图理解模块
-  - [ ] SubTask 11.2: 实现任务拆解与子Agent分派逻辑
-  - [ ] SubTask 11.3: 实现多Agent调度执行器
-  - [ ] SubTask 11.4: 实现结果聚合与输出格式化
+  - [ ] SubTask 11.1: 实现意图理解及Token统筹管理模块
+  - [ ] SubTask 11.2: 实现任务拆解与子Agent链式/并行分派逻辑
+  - [ ] SubTask 11.3: 实现接力模式信息流（上一个Agent输出作为下一个Agent输入）
+  - [ ] SubTask 11.4: 实现状态实时更新及结果聚合格式化输出
 
 - [ ] Task 12: 群聊模式与@提及功能
   - [ ] SubTask 12.1: 扩展Conversation模型支持多Agent成员
