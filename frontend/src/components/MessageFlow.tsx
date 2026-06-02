@@ -1,5 +1,5 @@
 import { useRef, useEffect, useState } from 'react';
-import { Avatar, Empty, Button, Dropdown, Space, message, Popover, Tag, Divider } from 'antd';
+import { Avatar, Empty, Button, Dropdown, message, Tag, Divider, Space } from 'antd';
 import { 
   MoreOutlined, 
   CommentOutlined, 
@@ -9,11 +9,10 @@ import {
   CheckOutlined, 
   CodeSandboxOutlined, 
   ExpandOutlined,
-  PushpinFilled,
-  PushpinOutlined,
   StarFilled,
   StarOutlined,
-  SettingOutlined
+  SettingOutlined,
+  EditOutlined
 } from '@ant-design/icons';
 import ReactMarkdown from 'react-markdown';
 import { Prism as SyntaxHighlighter } from 'react-syntax-highlighter';
@@ -27,7 +26,9 @@ import ImagePreviewCard from './ImagePreviewCard';
 import FileAttachmentCard from './FileAttachmentCard';
 import DeploymentStatusCard from './DeploymentStatusCard';
 import FullPreviewModal from './FullPreviewModal';
+import CodeEditorModal from './CodeEditorModal';
 import { WebPreviewData, CodeDiffData } from '../types';
+import { artifactsApi, deploymentsApi } from '../services';
 
 interface MessageFlowProps {
   messages: Message[];
@@ -36,6 +37,7 @@ interface MessageFlowProps {
   onApplyDiff?: (diffData: any) => void;
   onTogglePinMessage?: (msgId: string) => void;
   onSetLongContext?: () => void;
+  onSelectCodeForModify?: (selectedCode: string) => void;
 }
 
 interface FullPreviewState {
@@ -45,13 +47,39 @@ interface FullPreviewState {
   data: WebPreviewData | CodeDiffData;
 }
 
+interface CodeEditorState {
+  visible: boolean;
+  title: string;
+  fileName: string;
+  code: string;
+  language: string;
+}
+
+const ResolvedWebPreview: React.FC<{ data: WebPreviewData }> = ({ data }) => {
+  const [html, setHtml] = useState(data.htmlContent);
+  useEffect(() => {
+    if (!html && data.artifactId && data.versionId) {
+      artifactsApi.version(data.artifactId, data.versionId).then(version => setHtml(version.content)).catch(() => setHtml('Preview unavailable.'));
+    }
+  }, [data.artifactId, data.versionId, html]);
+  return <SandboxIframeWebPreview url={data.url} htmlContent={html} height={280} />;
+};
+
+function downloadBlob(blob: Blob, fileName: string) {
+  const link = document.createElement('a');
+  link.href = URL.createObjectURL(blob);
+  link.download = fileName;
+  link.click();
+  URL.revokeObjectURL(link.href);
+}
+
 const MessageFlow: React.FC<MessageFlowProps> = ({ 
   messages, 
   onReply, 
   onRegenerate, 
   onApplyDiff, 
   onTogglePinMessage,
-  onSetLongContext
+  onSelectCodeForModify
 }) => {
   const containerRef = useRef<HTMLDivElement>(null);
   const [fullPreviewState, setFullPreviewState] = useState<FullPreviewState>({
@@ -59,6 +87,13 @@ const MessageFlow: React.FC<MessageFlowProps> = ({
     title: '',
     type: 'web-preview',
     data: {},
+  });
+  const [codeEditorState, setCodeEditorState] = useState<CodeEditorState>({
+    visible: false,
+    title: '',
+    fileName: 'untitled.ts',
+    code: '',
+    language: 'typescript',
   });
   const [copiedCode, setCopiedCode] = useState<string | null>(null);
 
@@ -70,12 +105,23 @@ const MessageFlow: React.FC<MessageFlowProps> = ({
 
   const pinnedMessages = messages.filter(m => m.isPinned === true);
   const normalMessages = messages.filter(m => m.isPinned !== true);
+  const messagesById = new Map(messages.map(item => [item.id, item]));
 
   const handleCopyCode = (code: string) => {
     navigator.clipboard.writeText(code).then(() => {
       setCopiedCode(code);
       message.success('代码已复制到剪贴板！');
       setTimeout(() => setCopiedCode(null), 2000);
+    });
+  };
+
+  const handleOpenCodeEditor = (title: string, fileName: string, code: string, language: string) => {
+    setCodeEditorState({
+      visible: true,
+      title,
+      fileName,
+      code,
+      language,
     });
   };
 
@@ -98,11 +144,7 @@ const MessageFlow: React.FC<MessageFlowProps> = ({
           description={cardData.description}
           onFullScreen={handleOpenFullScreen}
         >
-          <SandboxIframeWebPreview
-            url={data.url}
-            htmlContent={data.htmlContent}
-            height={280}
-          />
+          <ResolvedWebPreview data={data} />
         </PreviewCard>
       );
     }
@@ -159,8 +201,21 @@ const MessageFlow: React.FC<MessageFlowProps> = ({
           fileName={data.fileName}
           fileSize={data.fileSize}
           fileType={data.fileType}
-          onDownload={() => alert('开始下载文件...')}
+          onDownload={async () => {
+            if (data.artifactId) downloadBlob(await artifactsApi.download(data.artifactId), data.fileName);
+          }}
         />
+      );
+    }
+    if (cardData.type === 'slides') {
+      const data = cardData.data as any;
+      return (
+        <PreviewCard key={`preview-card-${index}`} title={cardData.title} description="Editable presentation artifact">
+          <Space>
+            <Button onClick={async () => data.artifactId && downloadBlob(await artifactsApi.exportPptx(data.artifactId), `${cardData.title}.pptx`)}>Export PPTX</Button>
+            <Button onClick={async () => data.artifactId && downloadBlob(await artifactsApi.download(data.artifactId), `${cardData.title}.json`)}>Download source</Button>
+          </Space>
+        </PreviewCard>
       );
     }
     if (cardData.type === 'deployment-status') {
@@ -174,7 +229,11 @@ const MessageFlow: React.FC<MessageFlowProps> = ({
           deployUrl={data.deployUrl}
           errorMsg={data.errorMsg}
           onVisit={() => window.open(data.deployUrl, '_blank')}
-          onRedeploy={() => alert('重新部署')}
+          onRedeploy={async () => {
+            if (!data.deploymentId) return;
+            await deploymentsApi.redeploy(data.deploymentId);
+            message.success('Redeployment queued.');
+          }}
         />
       );
     }
@@ -190,6 +249,14 @@ const MessageFlow: React.FC<MessageFlowProps> = ({
         onClick: () => {
           onTogglePinMessage?.(msg.id);
           message.success(msg.isPinned ? '已取消固定' : '已固定为长期上下文！');
+        },
+      },
+      {
+        key: 'open-editor',
+        label: '打开代码编辑器',
+        icon: <EditOutlined />,
+        onClick: () => {
+          handleOpenCodeEditor('代码编辑', 'generated.ts', msg.content, 'typescript');
         },
       },
       {
@@ -282,6 +349,7 @@ const MessageFlow: React.FC<MessageFlowProps> = ({
             {normalMessages.map((message) => {
               const isUser = message.type === 'user';
               const previewCards = message.metadata?.preview_cards || [];
+              const quoted = message.quotedMessageId ? messagesById.get(message.quotedMessageId) : undefined;
               return (
                 <div
                   key={message.id}
@@ -337,18 +405,23 @@ const MessageFlow: React.FC<MessageFlowProps> = ({
                         wordBreak: 'break-word',
                       }}
                     >
+                      {quoted && <div style={{ borderLeft: '3px solid #91caff', padding: '4px 8px', marginBottom: 8, opacity: 0.85, fontSize: 12 }}>
+                        {quoted.senderName}: {quoted.content.slice(0, 120)}
+                      </div>}
                       <ReactMarkdown
                         components={{
-                          code({ node, inline, className, children, ...props }) {
+                          code({ className, children, ...props }) {
                             const match = /language-(\w+)/.exec(className || '');
                             const codeContent = String(children).replace(/\n$/, '');
-                            return !inline && match ? (
+                            return match ? (
                               <div style={{ position: 'relative', margin: '12px 0', borderRadius: 8, overflow: 'hidden' }}>
                                 <div style={{
                                   position: 'absolute',
                                   top: 8,
                                   right: 8,
                                   zIndex: 10,
+                                  display: 'flex',
+                                  gap: 8
                                 }}>
                                   <Button
                                     size="small"
@@ -362,6 +435,20 @@ const MessageFlow: React.FC<MessageFlowProps> = ({
                                   >
                                     {copiedCode === codeContent ? '已复制' : '复制'}
                                   </Button>
+                                  <Button
+                                    size="small"
+                                    type="text"
+                                    icon={<EditOutlined />}
+                                    onClick={() => {
+                                      handleOpenCodeEditor('代码编辑', `code.${match[1]}`, codeContent, match[1]);
+                                    }}
+                                    style={{
+                                      color: '#999',
+                                      backgroundColor: 'rgba(0,0,0,0.4)',
+                                    }}
+                                  >
+                                    编辑
+                                  </Button>
                                 </div>
                                 <SyntaxHighlighter
                                   style={vscDarkPlus}
@@ -372,7 +459,6 @@ const MessageFlow: React.FC<MessageFlowProps> = ({
                                     borderRadius: 8,
                                     fontSize: 14,
                                   }}
-                                  {...props}
                                 >
                                   {codeContent}
                                 </SyntaxHighlighter>
@@ -428,6 +514,20 @@ const MessageFlow: React.FC<MessageFlowProps> = ({
         type={fullPreviewState.type}
         data={fullPreviewState.data}
         onClose={() => setFullPreviewState((prev) => ({ ...prev, visible: false }))}
+      />
+      <CodeEditorModal
+        visible={codeEditorState.visible}
+        title={codeEditorState.title}
+        fileName={codeEditorState.fileName}
+        initialCode={codeEditorState.code}
+        language={codeEditorState.language}
+        onClose={() => setCodeEditorState((prev) => ({ ...prev, visible: false }))}
+        onSave={() => {
+          message.success('代码已保存');
+        }}
+        onSelectCodeForModify={(selectedCode) => {
+          onSelectCodeForModify?.(selectedCode);
+        }}
       />
     </>
   );

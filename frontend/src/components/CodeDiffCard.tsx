@@ -1,10 +1,5 @@
 import React from 'react';
-import { Space, Typography } from 'antd';
-import { Prism as SyntaxHighlighter } from 'react-syntax-highlighter';
-import { vscDarkPlus } from 'react-syntax-highlighter/dist/esm/styles/prism';
 import PreviewCard from './PreviewCard';
-
-const { Text } = Typography;
 
 interface CodeDiffCardProps {
   oldCode: string;
@@ -22,7 +17,6 @@ const CodeDiffCard: React.FC<CodeDiffCardProps> = ({
   onFullScreen,
 }) => {
   const generateDiffLines = (oldLines: string[], newLines: string[]) => {
-    const maxLen = Math.max(oldLines.length, newLines.length);
     const result: {
       type: 'unchanged' | 'added' | 'removed' | 'empty';
       content: string;

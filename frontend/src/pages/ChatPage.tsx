@@ -1,624 +1,377 @@
-import { useState, useEffect } from 'react';
-import { Layout, Avatar, Typography, message, Tabs, Badge, Button } from 'antd';
-import { CloseOutlined, UserOutlined, TeamOutlined } from '@ant-design/icons';
+import { useEffect, useRef, useState } from 'react';
+import { Alert, Avatar, Button, Card, Drawer, Form, Input, Layout, List, Modal, Space, Tabs, Tag, Typography, message as toast } from 'antd';
+import { AppstoreOutlined, CloseOutlined, ContactsOutlined, KeyOutlined, LogoutOutlined, RobotOutlined } from '@ant-design/icons';
+import type { Socket } from 'socket.io-client';
 import SessionList from '../components/SessionList';
 import MessageFlow from '../components/MessageFlow';
 import MessageInput from '../components/MessageInput';
 import NewSessionModal from '../components/NewSessionModal';
-import { Session, Message, Agent } from '../types';
-import dayjs from 'dayjs';
-import { CodeOutlined, RobotOutlined, ThunderboltOutlined } from '@ant-design/icons';
-import { messagesApi } from '../services';
+import ControlCenterModal from '../components/ControlCenterModal';
+import AgentContactList from '../components/AgentContactList';
+import { Agent, BackendConversation, Message, Session, User } from '../types';
+import { agentsApi, approvalsApi, authApi, authToken, connectSocket, conversationsApi, messagesApi, settingsApi } from '../services';
 
 const { Sider, Content } = Layout;
-const { Title } = Typography;
+const { Title, Text } = Typography;
 
-const PRESET_AGENTS: Agent[] = [
-  {
-    id: 'claude-code',
-    name: 'Claude Code',
-    description: 'Anthropic出品，擅长复杂长代码分析',
-    tags: ['长文本处理', '复杂推理', '安全代码'],
+function decorateAgent(agent: Agent): Agent {
+  const capabilities = Array.isArray(agent.capabilities) ? agent.capabilities : JSON.parse(agent.capabilities || '[]');
+  return {
+    ...agent,
+    tags: capabilities,
     iconType: 'RobotOutlined',
-    color: '#8B5CF6',
-  },
-  {
-    id: 'gpt-code',
-    name: 'GPT Code',
-    description: 'OpenAI出品，通用编程专家',
-    tags: ['快速响应', '全栈开发', 'Bug修复'],
-    iconType: 'CodeOutlined',
-    color: '#10B981',
-  },
-  {
-    id: 'open-code',
-    name: 'OpenCode',
-    description: '开源本地模型，高性能代码生成',
-    tags: ['本地运行', '高效生成', '隐私保护'],
-    iconType: 'ThunderboltOutlined',
-    color: '#F59E0B',
-  },
-];
+    color: agent.adapterType === 'claude' ? '#8B5CF6' : '#10B981',
+  };
+}
 
-const IconMap: Record<string, React.FC<any>> = {
-  'CodeOutlined': CodeOutlined,
-  'RobotOutlined': RobotOutlined,
-  'ThunderboltOutlined': ThunderboltOutlined,
-};
+function toSession(conversation: BackendConversation): Session {
+  return {
+    id: conversation.id,
+    name: conversation.title || '新会话',
+    agentIds: conversation.members.map(member => member.agent.id),
+    type: conversation.type,
+    isPinned: conversation.pinned,
+    isArchived: conversation.archived,
+    lastActiveAt: conversation.lastActiveAt,
+    unreadCount: 0,
+  };
+}
+
+function toMessage(raw: any, agents: Agent[]): Message {
+  let metadata = raw.metadata;
+  if (typeof metadata === 'string') {
+    try { metadata = JSON.parse(metadata); } catch { metadata = {}; }
+  }
+  const agent = agents.find(item => item.id === (raw.agentId || raw.senderId));
+  return {
+    id: raw.id,
+    sessionId: raw.conversationId,
+    senderId: raw.senderId,
+    senderName: raw.senderType === 'user' ? '我' : agent?.name || (raw.senderType === 'system' ? 'Orchestrator' : 'Agent'),
+    content: raw.content,
+    type: raw.senderType === 'user' ? 'user' : 'agent',
+    createdAt: raw.createdAt,
+    isPinned: raw.isPinned,
+    quotedMessageId: raw.quotedMessageId,
+    status: raw.status,
+    metadata,
+  };
+}
 
 const ChatPage: React.FC = () => {
+  const [user, setUser] = useState<User | null>(null);
+  const [authMode, setAuthMode] = useState<'login' | 'register'>('login');
+  const [agents, setAgents] = useState<Agent[]>([]);
   const [sessions, setSessions] = useState<Session[]>([]);
-  const [allMessages, setAllMessages] = useState<Record<string, Message[]>>({});
-  const [agents] = useState<Agent[]>(PRESET_AGENTS);
+  const [messages, setMessages] = useState<Record<string, Message[]>>({});
   const [selectedSessionId, setSelectedSessionId] = useState<string | null>(null);
   const [openSessionIds, setOpenSessionIds] = useState<string[]>([]);
-  const [newSessionModalVisible, setNewSessionModalVisible] = useState(false);
   const [selectedAgentIds, setSelectedAgentIds] = useState<string[]>([]);
-  const [isProcessing, setIsProcessing] = useState(false);
-  const [replyQuoteContent, setReplyQuoteContent] = useState<string>('');
+  const [newSessionVisible, setNewSessionVisible] = useState(false);
+  const [keysVisible, setKeysVisible] = useState(false);
+  const [controlCenterVisible, setControlCenterVisible] = useState(false);
+  const [agentsVisible, setAgentsVisible] = useState(false);
+  const [replyQuote, setReplyQuote] = useState('');
+  const [quotedMessageId, setQuotedMessageId] = useState<string | undefined>();
+  const [processing, setProcessing] = useState(false);
+  const [online, setOnline] = useState(navigator.onLine);
+  const [taskVisible, setTaskVisible] = useState(false);
+  const [runs, setRuns] = useState<any[]>([]);
+  const socketRef = useRef<Socket | null>(null);
+  const agentsRef = useRef<Agent[]>([]);
+  const sessionsRef = useRef<Session[]>([]);
+  const selectedSessionRef = useRef<string | null>(null);
 
   useEffect(() => {
-    const demoSessions: Session[] = [
-      {
-        id: 's1',
-        name: '全类型消息展示',
-        agentIds: ['claude-code'],
-        type: 'single',
-        lastMessage: '7种消息类型全部演示完毕...',
-        lastActiveAt: dayjs().subtract(5, 'minute').toISOString(),
-        isPinned: true,
-        isArchived: false,
-        unreadCount: 0,
-      },
-      {
-        id: 's2',
-        name: '代码协作群聊',
-        agentIds: ['claude-code', 'gpt-code', 'open-code'],
-        type: 'group',
-        lastMessage: '这段代码可以这样优化...',
-        lastActiveAt: dayjs().subtract(2, 'hour').toISOString(),
-        isPinned: false,
-        isArchived: false,
-        unreadCount: 0,
-      },
-      {
-        id: 's3',
-        name: '归档的历史对话',
-        agentIds: ['gpt-code'],
-        type: 'single',
-        lastMessage: '这个是很早之前的会话...',
-        lastActiveAt: dayjs().subtract(7, 'day').toISOString(),
-        isPinned: false,
-        isArchived: true,
-        unreadCount: 0,
-      },
-    ];
-    setSessions(demoSessions);
+    agentsRef.current = agents;
+  }, [agents]);
 
-    const demoMessagesS1: Message[] = [
-      {
-        id: 'm1',
-        sessionId: 's1',
-        senderId: 'user',
-        senderName: '我',
-        content: '请帮我创建一个精美的登录页面组件',
-        type: 'user',
-        createdAt: dayjs().subtract(8, 'minute').toISOString(),
-        isPinned: true,
-      },
-      {
-        id: 'm2',
-        sessionId: 's1',
-        senderId: 'claude-code',
-        senderName: 'Claude Code',
-        type: 'agent',
-        createdAt: dayjs().subtract(7, 'minute').toISOString(),
-        content: '✅ **AgentHub 全类型消息支持演示**\n\n### 1. 纯文本消息\n这是一条普通的纯文本消息，支持换行和基础格式。\n\n💡 这条关键消息已被您Pin为长期上下文，后续所有对话Agent都会自动引用它！',
-        isPinned: true,
-      },
-      {
-        id: 'm3',
-        sessionId: 's1',
-        senderId: 'claude-code',
-        senderName: 'Claude Code',
-        type: 'agent',
-        createdAt: dayjs().subtract(6, 'minute').toISOString(),
-        content: '### 2. 代码块消息\n```typescript\ninterface MessageType {\n  id: string;\n  type: \'text\' | \'code\' | \'image\' | \'file\' | \'preview\';\n  content: string;\n}\nconsole.log("Hello TypeScript!");\n```',
-      },
-      {
-        id: 'm4',
-        sessionId: 's1',
-        senderId: 'claude-code',
-        senderName: 'Claude Code',
-        type: 'agent',
-        createdAt: dayjs().subtract(5, 'minute').toISOString(),
-        content: '### 3. 网页预览卡片',
-        metadata: {
-          preview_cards: [
-            {
-              type: 'web-preview',
-              title: '登录页面预览',
-              description: '点击全屏查看完整交互效果',
-              data: {
-                htmlContent: `
-<!DOCTYPE html>
-<html>
-<head>
-  <style>
-    * { margin: 0; padding: 0; box-sizing: border-box; }
-    body { min-height: 300px; background: linear-gradient(135deg, #667eea 0%, #764ba2 100%); display: flex; align-items: center; justify-content: center; }
-    h1 { color: white; font-size: 32px; font-family: system-ui; }
-  </style>
-</head>
-<body><h1>AgentHub 网页预览 ✨</h1></body>
-</html>`,
-              },
-            },
-          ],
-        },
-      },
-      {
-        id: 'm5',
-        sessionId: 's1',
-        senderId: 'claude-code',
-        senderName: 'Claude Code',
-        type: 'agent',
-        createdAt: dayjs().subtract(4, 'minute').toISOString(),
-        content: '### 4. Code Diff 视图卡片',
-        metadata: {
-          preview_cards: [
-            {
-              type: 'code-diff',
-              title: 'App.tsx 修改',
-              description: '优化组件结构',
-              data: {
-                fileName: 'src/App.tsx',
-                oldCode: `export default function App() {\n  return <div>Hello</div>\n}`,
-                newCode: `import { Layout } from 'antd'\nexport default function App() {\n  return <Layout style={{ height: '100vh' }}>...</Layout>\n}`,
-                language: 'tsx',
-              },
-            },
-          ],
-        },
-      },
-      {
-        id: 'm6',
-        sessionId: 's1',
-        senderId: 'claude-code',
-        senderName: 'Claude Code',
-        type: 'agent',
-        createdAt: dayjs().subtract(3, 'minute').toISOString(),
-        content: '### 5. 图片预览卡片',
-        metadata: {
-          preview_cards: [
-            {
-              type: 'image',
-              title: '示例图片',
-              description: '支持点击放大预览',
-              data: {
-                imageUrl: 'https://picsum.photos/320/180',
-              },
-            },
-          ],
-        },
-      },
-      {
-        id: 'm7',
-        sessionId: 's1',
-        senderId: 'claude-code',
-        senderName: 'Claude Code',
-        type: 'agent',
-        createdAt: dayjs().subtract(2, 'minute').toISOString(),
-        content: '### 6. 文件附件卡片',
-        metadata: {
-          preview_cards: [
-            {
-              type: 'file-attachment',
-              title: '项目源码包',
-              description: 'zip压缩包',
-              data: {
-                fileName: 'agenthub-v1.0.0.zip',
-                fileSize: '12.5 MB',
-                fileType: 'ZIP 压缩包',
-              },
-            },
-          ],
-        },
-      },
-      {
-        id: 'm8',
-        sessionId: 's1',
-        senderId: 'claude-code',
-        senderName: 'Claude Code',
-        type: 'agent',
-        createdAt: dayjs().subtract(1, 'minute').toISOString(),
-        content: '### 7. 部署状态卡片\n所有7种消息类型已全部展示完毕！🎉\n\n🎯 **关键消息Pin功能**: 顶部「长期上下文」区域展示了您固定的2条关键消息，它们会被永远保留为Agent上下文，不会被截断！',
-        metadata: {
-          preview_cards: [
-            {
-              type: 'deployment-status',
-              title: 'AgentHub 正式部署',
-              description: '构建部署进度',
-              data: {
-                status: 'success',
-                progress: 100,
-                deployUrl: 'https://demo.agenthub.dev',
-              },
-            },
-          ],
-        },
-      },
-    ];
+  useEffect(() => {
+    sessionsRef.current = sessions;
+  }, [sessions]);
 
-    const demoMessagesS2: Message[] = [
-      {
-        id: 'm9',
-        sessionId: 's2',
-        senderId: 'user',
-        senderName: '我',
-        content: '@Claude Code @GPT Code 请帮我优化这段代码的性能',
-        type: 'user',
-        createdAt: dayjs().subtract(3, 'hour').toISOString(),
-      },
-    ];
+  useEffect(() => {
+    selectedSessionRef.current = selectedSessionId;
+  }, [selectedSessionId]);
 
-    setAllMessages({
-      s1: demoMessagesS1,
-      s2: demoMessagesS2,
-    });
-
-    setOpenSessionIds(['s1', 's2']);
-    setSelectedSessionId('s1');
+  useEffect(() => {
+    if (!authToken.get()) return;
+    authApi.me().then(setUser).catch(() => authToken.clear());
   }, []);
 
-  const simulateMultiAgentReply = async (
-    sessionId: string,
-    targetAgentIds: string[],
-    originalUserContent: string
-  ) => {
-    setIsProcessing(true);
-    const replies = [
-      {
-        agentId: 'claude-code',
-        agentName: 'Claude Code',
-        content: '我收到了您的优化需求，正在进行深度代码分析...\n\n**第一步: 识别性能瓶颈**\n- 发现了3个可优化的循环冗余计算点\n- 建议引入惰性加载策略',
-      },
-      {
-        agentId: 'gpt-code',
-        agentName: 'GPT Code',
-        content: '基于Claude的分析结果，我来提供具体的重构代码：\n\n```tsx\n// 优化前\nconst result = arr.map(x => x * 2).filter(x => x > 100)\n\n// 优化后 - 使用单次遍历\nconst result: number[] = []\nfor (const x of arr) {\n  const val = x * 2\n  if (val > 100) result.push(val)\n}\nconsole.log("性能提升约 40%")\n```',
-      },
-      {
-        agentId: 'open-code',
-        agentName: 'OpenCode',
-        content: '接力完成！我来做最终的安全性校验...\n\n✅ 所有代码通过了静态检查\n✅ 没有内存泄漏风险\n✅ 已为您生成完整的单元测试用例\n\n**多Agent协作任务全部完成！**',
-      },
-    ];
+  useEffect(() => {
+    const updateNetworkState = () => setOnline(navigator.onLine);
+    window.addEventListener('online', updateNetworkState);
+    window.addEventListener('offline', updateNetworkState);
+    return () => {
+      window.removeEventListener('online', updateNetworkState);
+      window.removeEventListener('offline', updateNetworkState);
+    };
+  }, []);
 
-    for (const reply of replies) {
-      await new Promise(resolve => setTimeout(resolve, 2000));
-      const msg: Message = {
-        id: `msg-${Date.now()}`,
-        sessionId,
-        senderId: reply.agentId,
-        senderName: reply.agentName,
-        type: 'agent',
-        content: reply.content,
-        createdAt: new Date().toISOString(),
-      };
-      setAllMessages((prev) => ({
-        ...prev,
-        [sessionId]: [...(prev[sessionId] || []), msg],
+  useEffect(() => {
+    if (!user) return;
+    Promise.all([agentsApi.getAgents(), conversationsApi.list()])
+      .then(([agentRows, conversationRows]) => {
+        setAgents(agentRows.map(decorateAgent));
+        setSessions(conversationRows.map(toSession));
+      })
+      .catch(error => toast.error(error.message));
+    const socket = connectSocket();
+    socketRef.current = socket;
+    socket.on('message:created', (raw: any) => appendMessage(toMessage(raw, agentsRef.current)));
+    socket.on('message:chunk', ({ conversationId, messageId, chunk }: { conversationId: string; messageId: string; chunk: string }) => {
+      setMessages(previous => ({
+        ...previous,
+        [conversationId]: (previous[conversationId] || []).map(item =>
+          item.id === messageId ? { ...item, content: item.content + chunk } : item
+        ),
       }));
-    }
+    });
+    socket.on('message:completed', (raw: any) => {
+      upsertMessage(toMessage(raw, agentsRef.current));
+      if (sessionsRef.current.find(item => item.id === raw.conversationId)?.type !== 'group') setProcessing(false);
+    });
+    socket.on('orchestration:state', (state: { status: string }) => setProcessing(state.status === 'running'));
+    socket.on('task:state', () => {
+      if (selectedSessionRef.current) conversationsApi.orchestrations(selectedSessionRef.current).then(setRuns).catch(() => undefined);
+    });
+    socket.on('tool:approval-created', () => toast.info('A tool action is awaiting approval.'));
+    socket.on('deployment:state', (state: { status: string }) => {
+      toast.info(`Deployment state: ${state.status}`);
+      window.agentHubDesktop?.notifyDeployment(`Deployment state: ${state.status}`);
+    });
+    socket.on('error', (error: { message?: string }) => {
+      setProcessing(false);
+      toast.error(error.message || '实时通信失败');
+    });
+    return () => {
+      socket.disconnect();
+      socketRef.current = null;
+    };
+  }, [user]);
 
-    setIsProcessing(false);
-    message.success('多Agent群聊协作完成！');
-  };
+  const appendMessage = (item: Message) => setMessages(previous => ({
+    ...previous,
+    [item.sessionId]: [...(previous[item.sessionId] || []).filter(existing => existing.id !== item.id), item],
+  }));
+  const upsertMessage = (item: Message) => setMessages(previous => ({
+    ...previous,
+    [item.sessionId]: (previous[item.sessionId] || []).some(existing => existing.id === item.id)
+      ? (previous[item.sessionId] || []).map(existing => existing.id === item.id ? item : existing)
+      : [...(previous[item.sessionId] || []), item],
+  }));
 
-  const handleReply = (msg: Message) => {
-    setReplyQuoteContent(`> ${msg.senderName}:\n> ${msg.content.split('\n')[0]}\n\n`);
-  };
-
-  const handleRegenerate = async (msg: Message) => {
-    message.info('正在重新生成该消息...');
-    await new Promise(resolve => setTimeout(resolve, 1500));
-    message.success('消息已重新生成！');
-  };
-
-  const handleTogglePinMessage = async (msgId: string) => {
-    try {
-      const updatedMsg = await messagesApi.togglePinMessage(msgId);
-      setAllMessages((prev) => {
-        const targetMessages = prev[selectedSessionId || ''] || [];
-        return {
-          ...prev,
-          [selectedSessionId || '']: targetMessages.map(m => 
-            m.id === msgId ? { ...m, isPinned: updatedMsg.isPinned } : m
-          ),
-        };
-      });
-    } catch (err) {
-      console.error('Failed to toggle pin message:', err);
-      message.error('操作失败，请稍后重试');
-    }
-  };
-
-  const handleApplyDiff = (diffData: any) => {
-    message.success(`Diff已一键应用到 ${diffData.fileName}！`);
-  };
-
-  const handleSelectSession = (session: Session) => {
-    if (!session.isArchived && !openSessionIds.includes(session.id)) {
-      setOpenSessionIds([...openSessionIds, session.id]);
-    }
+  const selectSession = async (session: Session) => {
     setSelectedSessionId(session.id);
-    setReplyQuoteContent('');
-    setSessions((prev) =>
-      prev.map((s) => (s.id === session.id ? { ...s, unreadCount: 0 } : s))
-    );
-  };
-
-  const handleCloseSessionTab = (sessionId: string) => {
-    const newOpenIds = openSessionIds.filter((id) => id !== sessionId);
-    setOpenSessionIds(newOpenIds);
-    if (selectedSessionId === sessionId) {
-      setSelectedSessionId(newOpenIds.length > 0 ? newOpenIds[newOpenIds.length - 1] : null);
+    setReplyQuote('');
+    setQuotedMessageId(undefined);
+    if (!openSessionIds.includes(session.id)) setOpenSessionIds(previous => [...previous, session.id]);
+    socketRef.current?.emit('conversation:join', session.id);
+    if (!messages[session.id]) {
+      try {
+        const result = await messagesApi.getMessages(session.id);
+        setMessages(previous => ({ ...previous, [session.id]: result.map(row => toMessage(row, agents)) }));
+      } catch (error: any) {
+        toast.error(error.message);
+      }
     }
-  };
-
-  const handlePinSession = (sessionId: string) => {
-    setSessions((prev) =>
-      prev.map((s) =>
-        s.id === sessionId ? { ...s, isPinned: !s.isPinned } : s
-      )
-    );
-  };
-
-  const handleArchiveSession = (sessionId: string) => {
-    setSessions((prev) =>
-      prev.map((s) =>
-        s.id === sessionId ? { ...s, isArchived: true } : s
-      )
-    );
-    handleCloseSessionTab(sessionId);
-    message.success('会话已归档');
-  };
-
-  const handleUnarchiveSession = (sessionId: string) => {
-    setSessions((prev) =>
-      prev.map((s) =>
-        s.id === sessionId ? { ...s, isArchived: false } : s
-      )
-    );
-    message.success('会话已从归档中恢复');
-  };
-
-  const handleCreateSession = (type: 'single' | 'group') => {
-    if (selectedAgentIds.length === 0) return;
-    const selectedAgents = agents.filter((a) =>
-      selectedAgentIds.includes(a.id)
-    );
-    const newSession: Session = {
-      id: `session-${Date.now()}`,
-      name: type === 'single' 
-        ? `${selectedAgents[0].name} 对话` 
-        : `${selectedAgents.map((a) => a.name).join(' & ')} 协作`,
-      agentIds: selectedAgentIds,
-      type,
-      lastMessage: '',
-      lastActiveAt: new Date().toISOString(),
-      isPinned: false,
-      isArchived: false,
-      unreadCount: 0,
-    };
-    setSessions((prev) => [newSession, ...prev]);
-    setAllMessages((prev) => ({ ...prev, [newSession.id]: [] }));
-    const newOpenIds = [...openSessionIds, newSession.id];
-    setOpenSessionIds(newOpenIds);
-    setSelectedSessionId(newSession.id);
-    setNewSessionModalVisible(false);
-    setSelectedAgentIds([]);
-    message.success(type === 'single' ? '单聊创建成功' : '群聊创建成功');
-  };
-
-  const handleSendMessage = (content: string) => {
-    if (!selectedSessionId || isProcessing) return;
-    const fullContent = replyQuoteContent ? `${replyQuoteContent}${content}` : content;
-    const currentSession = sessions.find(s => s.id === selectedSessionId);
-    if (!currentSession) return;
-
-    const newMessage: Message = {
-      id: `msg-${Date.now()}`,
-      sessionId: selectedSessionId,
-      senderId: 'user',
-      senderName: '我',
-      content: fullContent,
-      type: 'user',
-      createdAt: new Date().toISOString(),
-    };
-    setAllMessages((prev) => ({
-      ...prev,
-      [selectedSessionId]: [...(prev[selectedSessionId] || []), newMessage],
-    }));
-    setReplyQuoteContent('');
-    setSessions((prev) =>
-      prev.map((s) =>
-        s.id === selectedSessionId
-          ? { ...s, lastMessage: content, lastActiveAt: new Date().toISOString() }
-          : s
-      )
-    );
-
-    if (currentSession.type === 'group' && currentSession.agentIds.length > 1) {
-      message.info('Orchestrator 正在启动多Agent接力协作模式...');
-      setTimeout(() => {
-        simulateMultiAgentReply(selectedSessionId, currentSession.agentIds, content);
-      }, 500);
+    if (session.type === 'group') {
+      conversationsApi.orchestrations(session.id).then(setRuns).catch(() => setRuns([]));
     } else {
-      setTimeout(() => {
-        const replyAgentId = currentSession.agentIds[0];
-        const replyAgent = agents.find(a => a.id === replyAgentId);
-        
-        const replyMsg: Message = {
-          id: `msg-${Date.now() + 1}`,
-          sessionId: selectedSessionId,
-          senderId: replyAgentId,
-          senderName: replyAgent?.name || 'AI助手',
-          content: '收到您的消息！我正在为您分析并提供最佳方案...\n\n```javascript\nconsole.log("Hello AgentHub!")\n```',
-          type: 'agent',
-          createdAt: new Date().toISOString(),
-        };
-        
-        setAllMessages((prev) => ({
-          ...prev,
-          [selectedSessionId]: [...(prev[selectedSessionId] || []), replyMsg],
-        }));
-      }, 800);
+      setRuns([]);
     }
   };
 
-  const currentSession = sessions.find((s) => s.id === selectedSessionId);
-  const currentMessages = selectedSessionId ? (allMessages[selectedSessionId] || []) : [];
+  const createSession = async (type: 'single' | 'group') => {
+    const selected = agents.filter(agent => selectedAgentIds.includes(agent.id));
+    try {
+      const title = type === 'single' ? `${selected[0].name} 对话` : `${selected.map(agent => agent.name).join(' & ')} 协作`;
+      const row = await conversationsApi.create(title, type, selectedAgentIds);
+      const session = toSession(row);
+      setSessions(previous => [session, ...previous]);
+      setNewSessionVisible(false);
+      setSelectedAgentIds([]);
+      await selectSession(session);
+    } catch (error: any) {
+      toast.error(error.message);
+    }
+  };
 
-  const sessionTabItems = openSessionIds.map((sid) => {
-    const s = sessions.find((ss) => ss.id === sid);
-    const firstAgent = s?.agentIds[0] ? agents.find(a => a.id === s.agentIds[0]) : null;
-    const IconComponent = firstAgent?.iconType ? IconMap[firstAgent.iconType] : UserOutlined;
+  const sendMessage = (content: string) => {
+    if (!selectedSessionId) return;
+    const mentionedAgentIds = agents.filter(agent => content.includes(`@${agent.name}`)).map(agent => agent.id);
+    setProcessing(true);
+    socketRef.current?.emit('message:send', {
+      conversationId: selectedSessionId,
+      content,
+      mentionedAgentIds,
+      quotedMessageId,
+    });
+    setReplyQuote('');
+    setQuotedMessageId(undefined);
+  };
+
+  const currentMessages = selectedSessionId ? messages[selectedSessionId] || [] : [];
+  const tabs = openSessionIds.map(id => {
+    const session = sessions.find(item => item.id === id);
     return {
-      key: sid,
+      key: id,
       label: (
-        <Badge dot={s && s.unreadCount > 0} style={{ right: -2, top: 2 }}>
-          <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
-            <Avatar
-              size={24}
-              style={{
-                backgroundColor: firstAgent?.color || '#1890ff',
-                display: 'flex',
-                alignItems: 'center',
-                justifyContent: 'center',
-              }}
-              icon={<IconComponent />}
-            />
-            <span style={{ maxWidth: 100, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
-              {s?.name || '会话'}
-            </span>
-            <CloseOutlined
-              onClick={(e) => {
-                e.stopPropagation();
-                handleCloseSessionTab(sid);
-              }}
-              style={{ fontSize: 12, color: '#999', cursor: 'pointer', padding: 2 }}
-            />
-          </div>
-        </Badge>
+        <Space>
+          <Avatar size={22} icon={<RobotOutlined />} />
+          {session?.name || '会话'}
+          <CloseOutlined onClick={event => {
+            event.stopPropagation();
+            setOpenSessionIds(previous => previous.filter(item => item !== id));
+            if (selectedSessionId === id) setSelectedSessionId(null);
+          }} />
+        </Space>
       ),
     };
   });
 
+  if (!user) {
+    return (
+      <Layout style={{ height: '100vh', alignItems: 'center', justifyContent: 'center' }}>
+        <Card title="AgentHub" style={{ width: 380 }}>
+          <Form layout="vertical" onFinish={async values => {
+            try {
+              const result = authMode === 'login'
+                ? await authApi.login(values.email, values.password)
+                : await authApi.register(values.name, values.email, values.password);
+              authToken.set(result.token);
+              setUser(result.user);
+            } catch (error: any) {
+              toast.error(error.message);
+            }
+          }}>
+            {authMode === 'register' && <Form.Item name="name" label="名称" rules={[{ required: true }]}><Input /></Form.Item>}
+            <Form.Item name="email" label="邮箱" rules={[{ required: true, type: 'email' }]}><Input /></Form.Item>
+            <Form.Item name="password" label="密码" rules={[{ required: true, min: 8 }]}><Input.Password /></Form.Item>
+            <Button type="primary" htmlType="submit" block>{authMode === 'login' ? '登录' : '注册'}</Button>
+            <Button type="link" block onClick={() => setAuthMode(authMode === 'login' ? 'register' : 'login')}>
+              {authMode === 'login' ? '创建新账户' : '已有账户，登录'}
+            </Button>
+          </Form>
+        </Card>
+      </Layout>
+    );
+  }
+
   return (
-    <Layout style={{ height: '100vh', overflow: 'hidden' }}>
-      <Sider
-        width={320}
-        theme="light"
-        style={{
-          borderRight: '1px solid #f0f0f5',
-          overflow: 'hidden',
-        }}
-      >
+    <Layout style={{ height: '100vh' }}>
+      <Sider className="agenthub-sidebar" width={320} theme="light">
+        <div style={{ padding: 16, borderBottom: '1px solid #f0f0f0' }}>
+          <Space style={{ justifyContent: 'space-between', width: '100%' }}>
+            <Text strong>{user.name}</Text>
+            <Space>
+              <Button icon={<AppstoreOutlined />} onClick={() => setControlCenterVisible(true)} />
+              <Button icon={<ContactsOutlined />} onClick={() => setAgentsVisible(true)} />
+              <Button icon={<KeyOutlined />} onClick={() => setKeysVisible(true)} />
+              <Button icon={<LogoutOutlined />} onClick={() => { authToken.clear(); setUser(null); }} />
+            </Space>
+          </Space>
+        </div>
         <SessionList
           sessions={sessions}
           selectedSessionId={selectedSessionId}
-          onSelectSession={handleSelectSession}
-          onPinSession={handlePinSession}
-          onArchiveSession={handleArchiveSession}
-          onUnarchiveSession={handleUnarchiveSession}
-          onOpenNewSession={() => setNewSessionModalVisible(true)}
+          onSelectSession={selectSession}
+          onPinSession={async id => {
+            const session = sessions.find(item => item.id === id)!;
+            await conversationsApi.update(id, { pinned: !session.isPinned });
+            setSessions(previous => previous.map(item => item.id === id ? { ...item, isPinned: !item.isPinned } : item));
+          }}
+          onArchiveSession={async id => {
+            await conversationsApi.update(id, { archived: true });
+            setSessions(previous => previous.map(item => item.id === id ? { ...item, isArchived: true } : item));
+          }}
+          onUnarchiveSession={async id => {
+            await conversationsApi.update(id, { archived: false });
+            setSessions(previous => previous.map(item => item.id === id ? { ...item, isArchived: false } : item));
+          }}
+          onOpenNewSession={() => setNewSessionVisible(true)}
         />
       </Sider>
-      <Layout style={{ display: 'flex', flexDirection: 'column' }}>
-        <div
-          style={{
-            padding: '0 0 0 0',
-            borderBottom: '1px solid #f0f0f5',
-            backgroundColor: '#fff',
-          }}
-        >
-          {openSessionIds.length > 0 ? (
-            <Tabs
-              activeKey={selectedSessionId || undefined}
-              onChange={(key) => setSelectedSessionId(key)}
-              items={sessionTabItems}
-              type="card"
-              style={{ margin: 0 }}
-            />
-          ) : (
-            <div style={{ padding: '16px 24px', height: 56, display: 'flex', alignItems: 'center' }}>
-              <Title level={4} style={{ margin: 0, color: '#999' }}>
-                请选择或创建会话
-              </Title>
-            </div>
-          )}
-        </div>
-        <Content style={{ display: 'flex', flexDirection: 'column', overflow: 'hidden' }}>
+      <Layout>
+        {!online && <Alert type="warning" showIcon message="Offline. Approvals and deployments require a connection." />}
+        <Tabs activeKey={selectedSessionId || undefined} onChange={id => selectSession(sessions.find(item => item.id === id)!)} items={tabs} type="card" />
+        <Content style={{ display: 'flex', flexDirection: 'column', minHeight: 0 }}>
           {selectedSessionId ? (
             <>
-              <MessageFlow 
-                messages={currentMessages} 
-                onReply={handleReply}
-                onRegenerate={handleRegenerate}
-                onApplyDiff={handleApplyDiff}
-                onTogglePinMessage={handleTogglePinMessage}
+              {sessions.find(item => item.id === selectedSessionId)?.type === 'group' && <Button style={{ margin: '0 24px 8px', alignSelf: 'flex-start' }} onClick={async () => {
+                setRuns(await conversationsApi.orchestrations(selectedSessionId));
+                setTaskVisible(true);
+              }}>Task status</Button>}
+              <MessageFlow
+                messages={currentMessages}
+                onReply={item => {
+                  setReplyQuote(`> ${item.senderName}: ${item.content.split('\n')[0]}\n\n`);
+                  setQuotedMessageId(item.id);
+                }}
+                onTogglePinMessage={async id => {
+                  const updated = await messagesApi.togglePinMessage(id);
+                  upsertMessage(toMessage(updated, agents));
+                }}
+                onRegenerate={item => {
+                  if (!selectedSessionId) return;
+                  setProcessing(true);
+                  socketRef.current?.emit('message:regenerate', { conversationId: selectedSessionId, messageId: item.id });
+                }}
+                onApplyDiff={async data => {
+                  if (!data.approvalId) return toast.error('This diff has no approval request.');
+                  await approvalsApi.resolve(data.approvalId, 'approve');
+                  toast.success('Diff approved and applied.');
+                }}
+                onSelectCodeForModify={selectedCode => setReplyQuote(`Please modify the selected code below:\n\n\`\`\`\n${selectedCode}\n\`\`\`\n\nRequested change: `)}
               />
-              {isProcessing && (
-                <div style={{ padding: '12px 24px', backgroundColor: '#e6f4ff', borderTop: '1px solid #bae0ff' }}>
-                  <span style={{ color: '#1890ff' }}>⏳ Orchestrator 正在协调多个 Agent 接力协作中...</span>
-                </div>
-              )}
-              {replyQuoteContent && (
-                <div style={{ padding: '8px 24px', backgroundColor: '#fff7e6', borderTop: '1px solid #ffd591', display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
-                  <span style={{ fontSize: 13, color: '#fa8c16' }}>📌 已引用该消息进行回复</span>
-                  <Button type="text" size="small" onClick={() => setReplyQuoteContent('')}>取消引用</Button>
-                </div>
-              )}
-              <MessageInput
-                onSendMessage={handleSendMessage}
-                disabled={!selectedSessionId || isProcessing}
-                agents={agents}
-                initialContent={replyQuoteContent}
-              />
+              {processing && <Button danger style={{ margin: '0 24px 8px', alignSelf: 'flex-end' }} onClick={() => {
+                socketRef.current?.emit('orchestration:cancel', { conversationId: selectedSessionId });
+                setProcessing(false);
+              }}>Cancel generation</Button>}
+              <MessageInput onSendMessage={sendMessage} disabled={processing} agents={agents} initialContent={replyQuote} />
             </>
-          ) : (
-            <div
-              style={{
-                flex: 1,
-                display: 'flex',
-                alignItems: 'center',
-                justifyContent: 'center',
-                backgroundColor: '#f7f8fa',
-              }}
-            >
-              <div style={{ textAlign: 'center', color: '#999' }}>
-                <p style={{ fontSize: 16 }}>请从左侧选择一个会话开始聊天</p>
-                <p style={{ fontSize: 14, marginTop: 8 }}>
-                  点击左下角的「+ 新建会话」按钮创建新的对话
-                </p>
-              </div>
-            </div>
-          )}
+          ) : <div style={{ margin: 'auto' }}><Title level={4} type="secondary">请选择或创建会话</Title></div>}
         </Content>
       </Layout>
-      <NewSessionModal
-        visible={newSessionModalVisible}
-        agents={agents}
-        selectedAgentIds={selectedAgentIds}
-        onSelectAgents={setSelectedAgentIds}
-        onCreateSession={handleCreateSession}
-        onCancel={() => {
-          setNewSessionModalVisible(false);
-          setSelectedAgentIds([]);
-        }}
-      />
+      <NewSessionModal visible={newSessionVisible} agents={agents} selectedAgentIds={selectedAgentIds} onSelectAgents={setSelectedAgentIds} onCreateSession={createSession} onCancel={() => setNewSessionVisible(false)} />
+      <ControlCenterModal open={controlCenterVisible} onClose={() => setControlCenterVisible(false)} currentConversationId={selectedSessionId} />
+      <Modal title="Agent 联系人" open={agentsVisible} footer={null} width={560} onCancel={async () => {
+        setAgentsVisible(false);
+        const refreshed = await agentsApi.getAgents();
+        setAgents(refreshed.map(decorateAgent));
+      }}>
+        <div style={{ height: 560 }}><AgentContactList /></div>
+      </Modal>
+      <Modal title="模型 API Key" open={keysVisible} footer={null} onCancel={() => setKeysVisible(false)}>
+        <Form layout="vertical" onFinish={async values => {
+          try {
+            if (values.openai) await settingsApi.saveProvider('openai', { apiKey: values.openai });
+            if (values.anthropic) await settingsApi.saveProvider('anthropic', { apiKey: values.anthropic });
+            if (values.mimo) await settingsApi.saveProvider('mimo', { apiKey: values.mimo, baseURL: values.mimoBaseURL, defaultModel: values.mimoModel });
+            toast.success('密钥已加密保存');
+            setKeysVisible(false);
+          } catch (error: any) { toast.error(error.message); }
+        }}>
+          <Form.Item name="openai" label="OpenAI API Key"><Input.Password /></Form.Item>
+          <Form.Item name="anthropic" label="Anthropic API Key"><Input.Password /></Form.Item>
+          <Form.Item name="mimo" label="MiMo API Key"><Input.Password /></Form.Item>
+          <Form.Item name="mimoBaseURL" label="MiMo Base URL" initialValue="https://token-plan-cn.xiaomimimo.com/v1"><Input /></Form.Item>
+          <Form.Item name="mimoModel" label="MiMo Model" initialValue="mimo-v2.5-pro"><Input /></Form.Item>
+          <Button htmlType="submit" type="primary">保存</Button>
+        </Form>
+      </Modal>
+      <Drawer title="Orchestration tasks" open={taskVisible} onClose={() => setTaskVisible(false)} width={480}>
+        <List dataSource={runs} renderItem={run => (
+          <List.Item>
+            <List.Item.Meta title={<Space><span>{run.request}</span><Tag>{run.status}</Tag></Space>} description={
+              <List size="small" dataSource={run.tasks} renderItem={(task: any) => (
+                <List.Item><Space><span>{task.title}</span><Tag color={task.status === 'completed' ? 'green' : task.status === 'failed' ? 'red' : 'blue'}>{task.status}</Tag></Space></List.Item>
+              )} />
+            } />
+          </List.Item>
+        )} />
+      </Drawer>
     </Layout>
   );
 };

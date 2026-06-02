@@ -1,39 +1,45 @@
-import { Request, Response } from 'express'
+import { Response } from 'express'
 import prisma from '../utils/prisma'
+import { AuthenticatedRequest } from '../middleware/auth'
 
-export const getMessages = async (req: Request, res: Response) => {
-  const { conversationId } = req.params
-  const { limit = 200, offset = 0 } = req.query
+async function userOwnsConversation(userId: string, conversationId: string) {
+  return prisma.conversation.findFirst({ where: { id: conversationId, userId }, select: { id: true } })
+}
+
+export async function getMessages(req: AuthenticatedRequest, res: Response) {
+  if (!(await userOwnsConversation(req.userId!, req.params.conversationId))) {
+    return res.status(404).json({ error: 'Conversation not found' })
+  }
+  const limit = Math.min(Number(req.query.limit || 200), 500)
+  const offset = Number(req.query.offset || 0)
   const messages = await prisma.message.findMany({
-    where: { conversationId },
-    orderBy: [
-      { isPinned: 'desc' },
-      { createdAt: 'asc' }
-    ],
-    take: Number(limit),
-    skip: Number(offset)
+    where: { conversationId: req.params.conversationId },
+    orderBy: { createdAt: 'asc' },
+    take: limit,
+    skip: offset,
+    include: { artifactVersions: { include: { artifact: true } } }
   })
   res.json(messages)
 }
 
-export const getMessageById = async (req: Request, res: Response) => {
-  const { id } = req.params
-  const message = await prisma.message.findUnique({ where: { id } })
-  if (!message) {
-    return res.status(404).json({ error: 'Message not found' })
-  }
+export async function getMessageById(req: AuthenticatedRequest, res: Response) {
+  const message = await prisma.message.findFirst({
+    where: { id: req.params.id, conversation: { userId: req.userId! } },
+    include: { artifactVersions: { include: { artifact: true } } }
+  })
+  if (!message) return res.status(404).json({ error: 'Message not found' })
   res.json(message)
 }
 
-export const togglePinMessage = async (req: Request, res: Response) => {
-  const { id } = req.params
-  const message = await prisma.message.findUnique({ where: { id } })
-  if (!message) {
-    return res.status(404).json({ error: 'Message not found' })
-  }
+export async function togglePinMessage(req: AuthenticatedRequest, res: Response) {
+  const message = await prisma.message.findFirst({
+    where: { id: req.params.id, conversation: { userId: req.userId! } }
+  })
+  if (!message) return res.status(404).json({ error: 'Message not found' })
   const updatedMessage = await prisma.message.update({
-    where: { id },
+    where: { id: message.id },
     data: { isPinned: !message.isPinned }
   })
   res.json(updatedMessage)
 }
+

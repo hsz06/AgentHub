@@ -1,52 +1,43 @@
-import { BaseAgent } from './BaseAgent';
-import { OpenAIAgent } from './OpenAIAgent';
-import { ClaudeAgent } from './ClaudeAgent';
-import { TokenManager } from './TokenManager';
+import { Agent } from '@prisma/client'
+import { getProviderRuntimeConfig, Provider } from '../../controllers/SettingsController'
+import { BaseAgent } from './BaseAgent'
+import { ClaudeAgent } from './ClaudeAgent'
+import { CliAgent, isCliAdapter } from './CliAgent'
+import { OpenAIAgent } from './OpenAIAgent'
+import { TokenManager } from './TokenManager'
 
 export class AgentManager {
-  private static instance: AgentManager;
-  private agents: Map<string, BaseAgent>;
-  private tokenManager: TokenManager;
+  private static instance: AgentManager
+  private tokenManager = new TokenManager()
 
-  private constructor() {
-    this.agents = new Map<string, BaseAgent>();
-    this.tokenManager = new TokenManager();
-    this.registerDefaultAgents();
+  static getInstance() {
+    if (!AgentManager.instance) AgentManager.instance = new AgentManager()
+    return AgentManager.instance
   }
 
-  static getInstance(): AgentManager {
-    if (!AgentManager.instance) {
-      AgentManager.instance = new AgentManager();
+  async createRuntimeAgent(agent: Agent, userId: string): Promise<BaseAgent> {
+    if (agent.adapterType === 'openai' || agent.adapterType === 'mimo') {
+      const provider = agent.adapterType as Provider
+      const config = await getProviderRuntimeConfig(userId, provider)
+      if (!config.apiKey) throw new Error(`Configure a ${provider === 'mimo' ? 'MiMo' : 'OpenAI'} API key before using this Agent`)
+      return new OpenAIAgent(config.apiKey, config.baseURL, agent.model || config.model)
     }
-    return AgentManager.instance;
-  }
-
-  private registerDefaultAgents(): void {
-    try {
-      const openAIAgent = new OpenAIAgent();
-      this.registerAgent(openAIAgent);
-    } catch (e) {
+    if (agent.adapterType === 'claude') {
+      const config = await getProviderRuntimeConfig(userId, 'anthropic')
+      if (!config.apiKey) throw new Error('Configure an Anthropic API key before using this Agent')
+      return new ClaudeAgent(config.apiKey, agent.model || config.model)
     }
-    try {
-      const claudeAgent = new ClaudeAgent();
-      this.registerAgent(claudeAgent);
-    } catch (e) {
+    if (isCliAdapter(agent.adapterType)) {
+      return new CliAgent(agent, userId)
     }
+    throw new Error(`Unsupported Agent adapter: ${agent.adapterType}`)
   }
 
-  registerAgent(agent: BaseAgent): void {
-    this.agents.set(agent.getAgentName(), agent);
+  getTokenManager() {
+    return this.tokenManager
   }
 
-  getAgent(agentName: string): BaseAgent | undefined {
-    return this.agents.get(agentName);
-  }
-
-  getAllAgents(): BaseAgent[] {
-    return Array.from(this.agents.values());
-  }
-
-  getTokenManager(): TokenManager {
-    return this.tokenManager;
+  async initializeFromDatabase() {
+    // Runtime clients are created per user request so user BYOK never enters shared state.
   }
 }

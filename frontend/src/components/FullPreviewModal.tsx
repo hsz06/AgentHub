@@ -1,8 +1,8 @@
-import React from 'react';
+import React, { useEffect, useState } from 'react';
 import { Modal, Typography } from 'antd';
 import SandboxIframeWebPreview from './SandboxIframeWebPreview';
-import CodeDiffCard from './CodeDiffCard';
 import { PreviewCardType, WebPreviewData, CodeDiffData } from '../types';
+import { artifactsApi } from '../services';
 
 const { Title } = Typography;
 
@@ -21,13 +21,21 @@ const FullPreviewModal: React.FC<FullPreviewModalProps> = ({
   data,
   onClose,
 }) => {
+  const [resolvedHtml, setResolvedHtml] = useState<string | undefined>();
+  useEffect(() => {
+    const webData = data as WebPreviewData;
+    setResolvedHtml(webData.htmlContent);
+    if (type === 'web-preview' && !webData.htmlContent && webData.artifactId && webData.versionId) {
+      artifactsApi.version(webData.artifactId, webData.versionId).then(version => setResolvedHtml(version.content)).catch(() => setResolvedHtml('Preview unavailable.'));
+    }
+  }, [type, data]);
   const renderContent = () => {
     if (type === 'web-preview') {
       const webData = data as WebPreviewData;
       return (
         <SandboxIframeWebPreview
           url={webData.url}
-          htmlContent={webData.htmlContent}
+          htmlContent={resolvedHtml}
           height={600}
         />
       );

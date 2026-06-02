@@ -83,7 +83,6 @@ const AgentSelector: React.FC<AgentSelectorProps> = ({
   agents,
   selectedAgentIds = [],
   onSelectAgent,
-  mode = 'single',
 }) => {
   const handleAgentClick = (agentId: string) => {
     onSelectAgent?.(agentId);

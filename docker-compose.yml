@@ -1,0 +1,50 @@
+services:
+  api:
+    build: ./backend
+    environment:
+      DATABASE_URL: file:/data/agenthub.db
+      PORT: 3001
+      FRONTEND_URL: http://localhost:8080
+      JWT_SECRET: ${JWT_SECRET:-dev-only-change-me-before-sharing}
+      ENCRYPTION_KEY: ${ENCRYPTION_KEY:-dev-only-change-this-key-too}
+      WORKSPACE_ROOT: /workspaces
+      SANDBOX_EXECUTION_ENABLED: "false"
+      CLI_AGENT_WAIT_TIMEOUT_MS: 600000
+    ports:
+      - "3001:3001"
+    volumes:
+      - agenthub-data:/data
+      - agenthub-workspaces:/workspaces
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+  worker:
+    build: ./backend
+    command: ["sh", "-c", "npx prisma migrate deploy && node dist/worker.js"]
+    environment:
+      DATABASE_URL: file:/data/agenthub.db
+      JWT_SECRET: ${JWT_SECRET:-dev-only-change-me-before-sharing}
+      WORKSPACE_ROOT: /workspaces
+      SANDBOX_EXECUTION_ENABLED: "true"
+      SANDBOX_INSTALL_NETWORK: bridge
+      CLI_AGENT_RUN_TIMEOUT_MS: 300000
+    volumes:
+      - agenthub-data:/data
+      - agenthub-workspaces:/workspaces
+      - /var/run/docker.sock:/var/run/docker.sock
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    depends_on:
+      - api
+  web:
+    build:
+      context: ./frontend
+      args:
+        VITE_API_URL: http://localhost:3001/api
+        VITE_SOCKET_URL: http://localhost:3001
+    ports:
+      - "8080:80"
+    depends_on:
+      - api
+volumes:
+  agenthub-data:
+  agenthub-workspaces:

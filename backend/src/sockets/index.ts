@@ -1,175 +1,139 @@
 import { Server as HttpServer } from 'http'
 import { Server, Socket } from 'socket.io'
 import prisma from '../utils/prisma'
-import { Orchestrator } from '../services/Orchestrator'
+import { verifyToken } from '../middleware/auth'
+import { buildContext } from '../services/ContextService'
 import { AgentManager } from '../services/agents/AgentManager'
-import { Message as AgentMessage } from '../services/agents/BaseAgent'
+import { Orchestrator } from '../services/Orchestrator'
+import { attachGeneratedArtifacts, executeReadToolRequests } from '../services/ArtifactExtractionService'
+import { setRealtimeServer } from '../services/RealtimeHub'
+
+interface AuthedSocket extends Socket {
+  data: { userId: string }
+}
 
 export function setupSocketIO(httpServer: HttpServer) {
   const io = new Server(httpServer, {
-    cors: {
-      origin: "*",
-      methods: ["GET", "POST"]
+    cors: { origin: process.env.FRONTEND_URL || 'http://localhost:5173', methods: ['GET', 'POST'] }
+  })
+  const manager = AgentManager.getInstance()
+  const orchestrator = Orchestrator.getInstance()
+  setRealtimeServer(io)
+
+  io.use((socket, next) => {
+    try {
+      const token = socket.handshake.auth?.token
+      if (!token) throw new Error('Authentication required')
+      socket.data.userId = verifyToken(token).sub
+      next()
+    } catch (error) {
+      next(error instanceof Error ? error : new Error('Authentication failed'))
     }
   })
 
-  const orchestrator = Orchestrator.getInstance()
-  const agentManager = AgentManager.getInstance()
+  io.on('connection', (rawSocket: Socket) => {
+    const socket = rawSocket as AuthedSocket
+    socket.join(`user:${socket.data.userId}`)
+    const cancelledConversations = new Set<string>()
 
-  async function buildSingleAgentFullContext(conversationId: string, newMessageContent: string): Promise<AgentMessage[]> {
-    const allMessages = await prisma.message.findMany({
-      where: { conversationId },
-      orderBy: { createdAt: 'asc' }
-    })
-
-    const pinnedMessages = allMessages.filter(m => m.isPinned)
-    const recentMessages = allMessages.slice(-50)
-
-    const contextMessages: AgentMessage[] = []
-
-    if (pinnedMessages.length > 0) {
-      const pinnedContextHeader: AgentMessage = {
-        role: 'system',
-        content: `=== 长期上下文（关键消息，用户已固定）===\n${pinnedMessages.map(m => 
-          `[${m.senderType === 'user' ? '用户' : m.senderType === 'agent' ? 'AI' : '系统'}] ${m.content}`
-        ).join('\n\n')}\n============================================`
+    async function respondSingle(conversation: any, instruction?: string, toolDepth = 0) {
+      const agent = conversation.members[0]?.agent
+      if (!agent) throw new Error('Conversation has no Agent')
+      cancelledConversations.delete(conversation.id)
+      const placeholder = await prisma.message.create({
+        data: { conversationId: conversation.id, senderType: 'agent', senderId: agent.id, agentId: agent.id, content: '', messageType: 'text', status: 'streaming' }
+      })
+      io.to(`conversation:${conversation.id}`).emit('message:created', placeholder)
+      const runtime = await manager.createRuntimeAgent(agent, socket.data.userId)
+      const context = await buildContext(conversation.id, agent)
+      if (instruction) context.push({ role: 'user', content: instruction })
+      const workspace = await prisma.workspace.findFirst({ where: { userId: socket.data.userId, conversationId: conversation.id }, orderBy: { updatedAt: 'desc' } })
+      const content = await runtime.streamChat(context, chunk => {
+        if (!cancelledConversations.has(conversation.id)) {
+          io.to(`conversation:${conversation.id}`).emit('message:chunk', { conversationId: conversation.id, messageId: placeholder.id, chunk })
+        }
+      }, { model: agent.model || undefined, conversationId: conversation.id, workspaceId: workspace?.id, agentId: agent.id, messageId: placeholder.id })
+      if (cancelledConversations.has(conversation.id)) {
+        const cancelled = await prisma.message.update({ where: { id: placeholder.id }, data: { status: 'cancelled', content: 'Generation cancelled.' } })
+        io.to(`conversation:${conversation.id}`).emit('message:completed', cancelled)
+        return
       }
-      contextMessages.push(pinnedContextHeader)
+      let result = await prisma.message.update({ where: { id: placeholder.id }, data: { content, status: 'completed' } })
+      const allowedTools = JSON.parse(agent.tools || '[]') as string[]
+      const attached = await attachGeneratedArtifacts(socket.data.userId, result.id, content, { conversationId: conversation.id, agentId: agent.id, allowedTools })
+      result = attached.message || result
+      io.to(`conversation:${conversation.id}`).emit('message:completed', result)
+      const toolResult = await executeReadToolRequests(socket.data.userId, content, allowedTools)
+      if (toolResult && toolDepth < 1) {
+        const toolMessage = await prisma.message.create({
+          data: { conversationId: conversation.id, senderType: 'system', senderId: socket.data.userId, content: toolResult, messageType: 'tool-result', status: 'completed' }
+        })
+        io.to(`conversation:${conversation.id}`).emit('message:created', toolMessage)
+        await respondSingle(conversation, 'Use the tool result now available in the conversation to finish the requested work.', toolDepth + 1)
+      }
     }
 
-    recentMessages.forEach(m => {
-      const role: 'user' | 'assistant' | 'system' = 
-        m.senderType === 'user' ? 'user' : 
-        m.senderType === 'agent' ? 'assistant' : 'system'
-      
-      contextMessages.push({
-        role,
-        content: m.content
-      })
-    })
-
-    return contextMessages
-  }
-
-  io.on('connection', (socket: Socket) => {
-    console.log('Client connected:', socket.id)
-
-    socket.on('join-conversation', async (conversationId: string) => {
+    socket.on('conversation:join', async (conversationId: string) => {
+      const conversation = await prisma.conversation.findFirst({ where: { id: conversationId, userId: socket.data.userId } })
+      if (!conversation) return socket.emit('error', { message: 'Conversation not found' })
       socket.join(`conversation:${conversationId}`)
-      console.log(`Socket ${socket.id} joined conversation: ${conversationId}`)
-      socket.emit('joined-conversation', { conversationId })
     })
 
-    socket.on('send-message', async (data: {
+    socket.on('message:send', async (payload: {
       conversationId: string
-      senderType: string
-      senderId: string
       content: string
-      messageType: string
-      metadata?: string
+      mentionedAgentIds?: string[]
+      quotedMessageId?: string
+      artifactContext?: unknown
     }) => {
-      const userMessage = await prisma.message.create({
-        data: {
-          conversationId: data.conversationId,
-          senderType: data.senderType,
-          senderId: data.senderId,
-          content: data.content,
-          messageType: data.messageType,
-          metadata: data.metadata || '{}'
+      try {
+        const conversation = await prisma.conversation.findFirst({
+          where: { id: payload.conversationId, userId: socket.data.userId },
+          include: { members: { include: { agent: true } } }
+        })
+        if (!conversation) throw new Error('Conversation not found')
+        const userMessage = await prisma.message.create({
+          data: {
+            conversationId: conversation.id,
+            senderType: 'user',
+            senderId: socket.data.userId,
+            content: payload.content,
+            messageType: 'text',
+            quotedMessageId: payload.quotedMessageId,
+            metadata: JSON.stringify({ mentionedAgentIds: payload.mentionedAgentIds || [], artifactContext: payload.artifactContext })
+          }
+        })
+        await prisma.conversation.update({ where: { id: conversation.id }, data: { lastActiveAt: new Date() } })
+        io.to(`conversation:${conversation.id}`).emit('message:created', userMessage)
+
+        if (conversation.type === 'group' || conversation.members.length > 1) {
+          await orchestrator.processGroupConversation(socket.data.userId, conversation.id, payload.mentionedAgentIds || [], io)
+          return
         }
-      })
-      
-      await prisma.conversation.update({
-        where: { id: data.conversationId },
-        data: { lastActiveAt: new Date() }
-      })
-
-      io.to(`conversation:${data.conversationId}`).emit('new-message', userMessage)
-
-      const conversation = await prisma.conversation.findUnique({
-        where: { id: data.conversationId },
-        include: { members: { include: { agent: true } } }
-      })
-
-      if (!conversation) return
-
-      if (conversation.members.length <= 1) {
-        const singleMember = conversation.members[0]
-        if (!singleMember) return
-        const runtimeAgent = agentManager.getAgent(singleMember.agent.name)
-        if (!runtimeAgent) return
-
-        const fullContextMessages: AgentMessage[] = await buildSingleAgentFullContext(data.conversationId, data.content)
-        
-        try {
-          const replyContent = await runtimeAgent.normalChat(fullContextMessages)
-          const agentMessage = await prisma.message.create({
-            data: {
-              conversationId: data.conversationId,
-              senderType: 'agent',
-              senderId: singleMember.agentId,
-              content: replyContent,
-              messageType: 'text'
-            }
-          })
-          io.to(`conversation:${data.conversationId}`).emit('new-message', agentMessage)
-        } catch (err) {
-          const errorMsg = await prisma.message.create({
-            data: {
-              conversationId: data.conversationId,
-              senderType: 'system',
-              senderId: 'system',
-              content: `Agent 回复失败: ${String(err)}`,
-              messageType: 'text'
-            }
-          })
-          io.to(`conversation:${data.conversationId}`).emit('new-message', errorMsg)
-        }
-      } else {
-        orchestrator.processGroupConversation(data.conversationId, data.content, io)
-          .then(async (aggregatedResult) => {
-            const resultMessage = await prisma.message.create({
-              data: {
-                conversationId: data.conversationId,
-                senderType: 'system',
-                senderId: 'orchestrator',
-                content: aggregatedResult,
-                messageType: 'text'
-              }
-            })
-            io.to(`conversation:${data.conversationId}`).emit('new-message', resultMessage)
-          })
-          .catch(async (err) => {
-            const errorMsg = await prisma.message.create({
-              data: {
-                conversationId: data.conversationId,
-                senderType: 'system',
-                senderId: 'system',
-                content: `Orchestrator 调度失败: ${String(err)}`,
-                messageType: 'text'
-              }
-            })
-            io.to(`conversation:${data.conversationId}`).emit('new-message', errorMsg)
-          })
+        await respondSingle(conversation)
+      } catch (error) {
+        socket.emit('error', { message: error instanceof Error ? error.message : String(error) })
       }
     })
 
-    socket.on('stream-chunk', (data: {
-      conversationId: string
-      messageId?: string
-      chunk: string
-      isDone?: boolean
-    }) => {
-      io.to(`conversation:${data.conversationId}`).emit('stream-chunk', data)
+    socket.on('message:regenerate', async (payload: { conversationId: string; messageId: string }) => {
+      try {
+        const conversation = await prisma.conversation.findFirst({
+          where: { id: payload.conversationId, userId: socket.data.userId, type: 'single' },
+          include: { members: { include: { agent: true } } }
+        })
+        const original = await prisma.message.findFirst({ where: { id: payload.messageId, conversationId: payload.conversationId, senderType: 'agent' } })
+        if (!conversation || !original) throw new Error('Message is not available for regeneration')
+        await respondSingle(conversation, 'Regenerate a fresh answer to the latest user request. Do not refer to the previous draft.')
+      } catch (error) {
+        socket.emit('error', { message: error instanceof Error ? error.message : String(error) })
+      }
     })
 
-    socket.on('leave-conversation', (conversationId: string) => {
-      socket.leave(`conversation:${conversationId}`)
-      console.log(`Socket ${socket.id} left conversation: ${conversationId}`)
-    })
-
-    socket.on('disconnect', () => {
-      console.log('Client disconnected:', socket.id)
+    socket.on('orchestration:cancel', async (payload: { conversationId: string }) => {
+      cancelledConversations.add(payload.conversationId)
+      const run = await orchestrator.cancel(socket.data.userId, payload.conversationId)
+      io.to(`conversation:${payload.conversationId}`).emit('orchestration:state', { runId: run?.id, status: 'cancelled' })
     })
   })
 

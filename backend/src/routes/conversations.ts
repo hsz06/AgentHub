@@ -4,13 +4,17 @@ import {
   getConversationById,
   createConversation,
   updateConversation,
-  deleteConversation
+  deleteConversation,
+  getOrchestrationRuns
 } from '../controllers/ConversationController'
+import { requireAuth } from '../middleware/auth'
 
 const router = express.Router()
 
+router.use(requireAuth)
 router.get('/', getConversations)
 router.get('/:id', getConversationById)
+router.get('/:id/orchestrations', getOrchestrationRuns)
 router.post('/', createConversation)
 router.put('/:id', updateConversation)
 router.delete('/:id', deleteConversation)

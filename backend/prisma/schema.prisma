@@ -8,50 +8,105 @@ datasource db {
 }
 
 model User {
-  id                String   @id @default(uuid())
-  name              String
-  encryptedApiKeys  String   @default("{}")
-  createdAt         DateTime @default(now())
-  updatedAt         DateTime @updatedAt
-  conversations     Conversation[]
+  id               String   @id @default(uuid())
+  name             String
+  email            String   @unique
+  passwordHash     String
+  encryptedApiKeys String   @default("{}")
+  createdAt        DateTime @default(now())
+  updatedAt        DateTime @updatedAt
+  agents           Agent[]
+  conversations    Conversation[]
+  workspaces       Workspace[]
+  artifacts        Artifact[]
+  approvals        ToolApproval[]
+  deployments      Deployment[]
+  orchestrationRuns OrchestrationRun[]
+  providerConfigs  ProviderConfig[]
+  fileRevisions    WorkspaceFileRevision[]
+  cliRuntimeConfigs CliRuntimeConfig[]
+  cliRuns           CliRun[]
 }
 
 model Agent {
-  id              String   @id @default(uuid())
-  name            String
-  avatar          String?
-  description     String?
-  capabilities    String   @default("[]")
-  systemPrompt    String?
-  adapterType     String
-  isBuiltin       Boolean  @default(false)
-  createdAt       DateTime @default(now())
-  updatedAt       DateTime @updatedAt
+  id                  String   @id @default(uuid())
+  name                String
+  avatar              String?
+  description         String?
+  capabilities        String   @default("[]")
+  systemPrompt        String?
+  adapterType         String
+  model               String?
+  tools               String   @default("[]")
+  isBuiltin           Boolean  @default(false)
+  userId              String?
+  user                User?    @relation(fields: [userId], references: [id], onDelete: Cascade)
+  createdAt           DateTime @default(now())
+  updatedAt           DateTime @updatedAt
   conversationMembers ConversationMember[]
+  messages            Message[] @relation("AgentMessages")
+  cliRuns             CliRun[]
+  @@index([userId])
 }
 
-model Conversation {
+model CliRuntimeConfig {
   id              String   @id @default(uuid())
-  title           String?
-  type            String
-  pinned          Boolean  @default(false)
-  archived        Boolean  @default(false)
-  lastActiveAt    DateTime @default(now())
+  runtimeType     String
+  displayName     String
+  dockerImage     String
+  commandTemplate String
+  enabled         Boolean  @default(false)
+  encryptedApiKey String?
+  envVarName      String
   userId          String
   user            User     @relation(fields: [userId], references: [id], onDelete: Cascade)
   createdAt       DateTime @default(now())
   updatedAt       DateTime @updatedAt
-  members         ConversationMember[]
-  messages        Message[]
+  @@unique([userId, runtimeType])
+}
+
+model ProviderConfig {
+  id              String   @id @default(uuid())
+  providerType    String
+  displayName     String
+  baseURL         String?
+  defaultModel    String?
+  encryptedApiKey String?
+  userId          String
+  user            User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  createdAt       DateTime @default(now())
+  updatedAt       DateTime @updatedAt
+  @@unique([userId, providerType])
+}
+
+model Conversation {
+  id                String   @id @default(uuid())
+  title             String?
+  type              String
+  pinned            Boolean  @default(false)
+  archived          Boolean  @default(false)
+  summary           String?
+  lastActiveAt      DateTime @default(now())
+  userId            String
+  user              User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  createdAt         DateTime @default(now())
+  updatedAt         DateTime @updatedAt
+  members           ConversationMember[]
+  messages          Message[]
+  workspaces        Workspace[]
+  orchestrationRuns OrchestrationRun[]
+  cliRuns           CliRun[]
+  @@index([userId, lastActiveAt])
 }
 
 model ConversationMember {
-  id              String       @id @default(uuid())
-  conversationId  String
-  conversation    Conversation @relation(fields: [conversationId], references: [id], onDelete: Cascade)
-  agentId         String
-  agent           Agent        @relation(fields: [agentId], references: [id], onDelete: Cascade)
-  joinedAt        DateTime     @default(now())
+  id             String       @id @default(uuid())
+  conversationId String
+  conversation   Conversation @relation(fields: [conversationId], references: [id], onDelete: Cascade)
+  agentId        String
+  agent          Agent        @relation(fields: [agentId], references: [id], onDelete: Cascade)
+  joinedAt       DateTime     @default(now())
+  @@unique([conversationId, agentId])
 }
 
 model Message {
@@ -60,10 +115,192 @@ model Message {
   conversation    Conversation @relation(fields: [conversationId], references: [id], onDelete: Cascade)
   senderType      String
   senderId        String
+  agentId         String?
+  agent           Agent?   @relation("AgentMessages", fields: [agentId], references: [id], onDelete: SetNull)
   content         String
   messageType     String
   metadata        String   @default("{}")
   isPinned        Boolean  @default(false)
+  quotedMessageId String?
+  status          String   @default("completed")
   createdAt       DateTime @default(now())
   updatedAt       DateTime @updatedAt
+  artifactVersions ArtifactVersion[]
+  @@index([conversationId, createdAt])
+}
+
+model Workspace {
+  id             String   @id @default(uuid())
+  name           String
+  rootPath       String
+  userId         String
+  user           User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  conversationId String?
+  conversation   Conversation? @relation(fields: [conversationId], references: [id], onDelete: SetNull)
+  createdAt      DateTime @default(now())
+  updatedAt      DateTime @updatedAt
+  artifacts      Artifact[]
+  approvals      ToolApproval[]
+  deployments    Deployment[]
+  fileRevisions  WorkspaceFileRevision[]
+  cliRuns        CliRun[]
+  @@index([userId])
+}
+
+model CliRun {
+  id             String   @id @default(uuid())
+  userId         String
+  user           User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  agentId        String
+  agent          Agent    @relation(fields: [agentId], references: [id], onDelete: Cascade)
+  conversationId String
+  conversation   Conversation @relation(fields: [conversationId], references: [id], onDelete: Cascade)
+  workspaceId    String
+  workspace      Workspace @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
+  status         String   @default("queued")
+  prompt         String
+  stdout         String   @default("")
+  stderr         String   @default("")
+  result         String?
+  baseSnapshot   String   @default("{}")
+  diffSummary    String   @default("[]")
+  messageId      String?
+  createdAt      DateTime @default(now())
+  updatedAt      DateTime @updatedAt
+  completedAt    DateTime?
+  @@index([userId, status])
+  @@index([conversationId, createdAt])
+}
+
+model WorkspaceFileRevision {
+  id          String   @id @default(uuid())
+  workspaceId String
+  workspace   Workspace @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
+  userId      String
+  user        User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  filePath    String
+  baseHash    String?
+  contentHash String
+  content     String
+  operation   String
+  createdAt   DateTime @default(now())
+  @@index([workspaceId, filePath, createdAt])
+}
+
+model Artifact {
+  id          String   @id @default(uuid())
+  name        String
+  type        String
+  mimeType    String?
+  userId      String
+  user        User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  workspaceId String?
+  workspace   Workspace? @relation(fields: [workspaceId], references: [id], onDelete: SetNull)
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+  versions    ArtifactVersion[]
+  deployments Deployment[]
+  @@index([userId])
+}
+
+model ArtifactVersion {
+  id          String   @id @default(uuid())
+  artifactId  String
+  artifact    Artifact @relation(fields: [artifactId], references: [id], onDelete: Cascade)
+  version     Int
+  content     String
+  metadata    String   @default("{}")
+  createdBy   String
+  createdAt   DateTime @default(now())
+  messageId   String?
+  message     Message? @relation(fields: [messageId], references: [id], onDelete: SetNull)
+  @@unique([artifactId, version])
+}
+
+model ToolApproval {
+  id          String   @id @default(uuid())
+  type        String
+  title       String
+  payload     String
+  status      String   @default("pending")
+  result      String?
+  userId      String
+  user        User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  workspaceId String?
+  workspace   Workspace? @relation(fields: [workspaceId], references: [id], onDelete: SetNull)
+  deploymentId String?
+  deployment  Deployment? @relation(fields: [deploymentId], references: [id], onDelete: SetNull)
+  resolvedAt  DateTime?
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+  @@index([userId, status])
+}
+
+model Deployment {
+  id          String   @id @default(uuid())
+  name        String
+  type        String
+  status      String   @default("pending_approval")
+  previewUrl  String?
+  logs        String   @default("")
+  containerId String?
+  exposedPort Int?
+  runtimeUrl  String?
+  userId      String
+  user        User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  workspaceId String?
+  workspace   Workspace? @relation(fields: [workspaceId], references: [id], onDelete: SetNull)
+  artifactId  String?
+  artifactVersionId String?
+  artifact    Artifact? @relation(fields: [artifactId], references: [id], onDelete: SetNull)
+  approvals   ToolApproval[]
+  logEntries  DeploymentLog[]
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+  @@index([userId, status])
+}
+
+model DeploymentLog {
+  id           String     @id @default(uuid())
+  deploymentId String
+  deployment   Deployment @relation(fields: [deploymentId], references: [id], onDelete: Cascade)
+  level        String     @default("info")
+  message      String
+  createdAt    DateTime   @default(now())
+  @@index([deploymentId, createdAt])
+}
+
+model OrchestrationRun {
+  id             String   @id @default(uuid())
+  conversationId String
+  conversation   Conversation @relation(fields: [conversationId], references: [id], onDelete: Cascade)
+  userId         String
+  user           User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  mode           String
+  status         String   @default("running")
+  request        String
+  state          String   @default("{}")
+  result         String?
+  createdAt      DateTime @default(now())
+  updatedAt      DateTime @updatedAt
+  completedAt    DateTime?
+  tasks          OrchestrationTask[]
+  @@index([conversationId, createdAt])
+}
+
+model OrchestrationTask {
+  id            String   @id @default(uuid())
+  runId         String
+  run           OrchestrationRun @relation(fields: [runId], references: [id], onDelete: Cascade)
+  agentId       String?
+  title         String
+  input         String
+  output        String?
+  dependencies  String   @default("[]")
+  status        String   @default("pending")
+  startedAt     DateTime?
+  completedAt   DateTime?
+  createdAt     DateTime @default(now())
+  updatedAt     DateTime @updatedAt
+  @@index([runId, status])
 }

@@ -1,4 +1,4 @@
-import React, { useEffect, useRef, useState } from 'react';
+import React, { useMemo, useState } from 'react';
 import { Alert, Spin } from 'antd';
 
 interface SandboxIframeWebPreviewProps {
@@ -12,26 +12,10 @@ const SandboxIframeWebPreview: React.FC<SandboxIframeWebPreviewProps> = ({
   htmlContent,
   height = 320,
 }) => {
-  const iframeRef = useRef<HTMLIFrameElement>(null);
   const [loading, setLoading] = useState(true);
-  const [error, setError] = useState<string | null>(null);
-
-  useEffect(() => {
-    if (iframeRef.current && htmlContent) {
-      try {
-        const doc = iframeRef.current.contentDocument;
-        if (doc) {
-          doc.open();
-          doc.write(htmlContent);
-          doc.close();
-        }
-        setLoading(false);
-      } catch (e) {
-        setError('无法加载内容，可能存在安全限制');
-        setLoading(false);
-      }
-    }
-  }, [htmlContent]);
+  const safeHtml = useMemo(() => htmlContent ? `<!doctype html>
+<meta http-equiv="Content-Security-Policy" content="default-src 'none'; img-src data:; style-src 'unsafe-inline'; font-src data:; script-src 'unsafe-inline'; connect-src 'none'; form-action 'none'; base-uri 'none'">
+${htmlContent}` : undefined, [htmlContent]);
 
   const handleIframeLoad = () => {
     setLoading(false);
@@ -68,20 +52,11 @@ const SandboxIframeWebPreview: React.FC<SandboxIframeWebPreviewProps> = ({
           <Spin size="large" tip="正在加载预览..." />
         </div>
       )}
-      {error && (
-        <Alert
-          message="安全限制"
-          description={error}
-          type="error"
-          showIcon
-          style={{ margin: 0, position: 'absolute', top: 0, left: 0, right: 0, zIndex: 2 }}
-        />
-      )}
       <iframe
-        ref={iframeRef}
         src={url}
+        srcDoc={safeHtml}
         onLoad={handleIframeLoad}
-        sandbox="allow-scripts allow-same-origin allow-forms allow-popups"
+        sandbox="allow-scripts"
         style={{
           width: '100%',
           height: '100%',

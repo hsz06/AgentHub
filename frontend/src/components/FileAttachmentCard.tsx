@@ -1,7 +1,7 @@
-import { Card, Typography, Button, Space, Progress } from 'antd';
-import { FileOutlined, DownloadOutlined, CheckCircleOutlined } from '@ant-design/icons';
+import { Card, Typography, Button, Space } from 'antd';
+import { FileOutlined, DownloadOutlined } from '@ant-design/icons';
 
-const { Text, Paragraph } = Typography;
+const { Text } = Typography;
 
 interface FileAttachmentCardProps {
   fileName: string;
