@@ -1,12 +1,11 @@
-import { Card, Typography, Button } from 'antd';
+import { Button } from 'antd';
 import { ExpandOutlined } from '@ant-design/icons';
 import React from 'react';
-
-const { Title, Text } = Typography;
 
 interface PreviewCardProps {
   title: string;
   description?: string;
+  kicker?: string;
   children: React.ReactNode;
   onFullScreen?: () => void;
   headerExtra?: React.ReactNode;
@@ -15,48 +14,47 @@ interface PreviewCardProps {
 const PreviewCard: React.FC<PreviewCardProps> = ({
   title,
   description,
+  kicker = 'ARTIFACT',
   children,
   onFullScreen,
   headerExtra,
 }) => {
   return (
-    <Card
-      style={{
-        borderRadius: 12,
-        overflow: 'hidden',
-        border: '1px solid #e8e8e8',
-        boxShadow: '0 2px 8px rgba(0, 0, 0, 0.06)',
-        transition: 'all 0.3s ease',
-      }}
-      bodyStyle={{ padding: 0 }}
-      onMouseEnter={(e) => {
-        (e.currentTarget as HTMLElement).style.boxShadow = '0 4px 16px rgba(0, 0, 0, 0.1)';
-      }}
-      onMouseLeave={(e) => {
-        (e.currentTarget as HTMLElement).style.boxShadow = '0 2px 8px rgba(0, 0, 0, 0.06)';
-      }}
-    >
-      <div
-        style={{
-          padding: '12px 16px',
-          borderBottom: '1px solid #f0f0f0',
-          backgroundColor: '#fafafa',
-          display: 'flex',
-          alignItems: 'center',
-          justifyContent: 'space-between',
-        }}
-      >
-        <div style={{ display: 'flex', flexDirection: 'column', gap: 2 }}>
-          <Title level={5} style={{ margin: 0, fontSize: 14 }}>
-            {title}
-          </Title>
+    <section className="artifact-preview-card">
+      <header style={{
+        padding: '12px 14px',
+        borderBottom: '1px solid var(--canvas-rule-soft)',
+        background: 'var(--canvas)',
+        display: 'flex',
+        alignItems: 'flex-start',
+        justifyContent: 'space-between',
+        gap: 12,
+      }}>
+        <div style={{ minWidth: 0 }}>
+          <div className="kicker" style={{ display: 'block', marginBottom: 4, color: 'var(--ink-faint)' }}>
+            {kicker}
+          </div>
+          <div style={{
+            fontFamily: 'var(--font-display)',
+            fontWeight: 600,
+            fontSize: 15,
+            letterSpacing: '-0.02em',
+            color: 'var(--ink)',
+            lineHeight: 1.2,
+            overflow: 'hidden',
+            textOverflow: 'ellipsis',
+            whiteSpace: 'nowrap',
+          }}>{title}</div>
           {description && (
-            <Text type="secondary" style={{ fontSize: 12 }}>
-              {description}
-            </Text>
+            <div style={{
+              marginTop: 3,
+              fontSize: 12.5,
+              color: 'var(--ink-soft)',
+              lineHeight: 1.5,
+            }}>{description}</div>
           )}
         </div>
-        <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+        <div style={{ display: 'flex', alignItems: 'center', gap: 4, flexShrink: 0 }}>
           {headerExtra}
           {onFullScreen && (
             <Button
@@ -64,15 +62,19 @@ const PreviewCard: React.FC<PreviewCardProps> = ({
               size="small"
               icon={<ExpandOutlined />}
               onClick={onFullScreen}
-              style={{ color: '#666' }}
+              style={{
+                color: 'var(--ink-muted)',
+                fontSize: 12,
+                fontWeight: 500,
+              }}
             >
-              全屏
+              展开
             </Button>
           )}
         </div>
-      </div>
-      <div style={{ padding: 16 }}>{children}</div>
-    </Card>
+      </header>
+      <div style={{ padding: 14 }}>{children}</div>
+    </section>
   );
 };
 

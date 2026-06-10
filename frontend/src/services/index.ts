@@ -53,7 +53,10 @@ export const conversationsApi = {
     request<BackendConversation>('/conversations', { method: 'POST', body: JSON.stringify({ title, type, agentIds }) }),
   update: (id: string, data: Partial<{ title: string; pinned: boolean; archived: boolean }>) =>
     request<BackendConversation>(`/conversations/${id}`, { method: 'PUT', body: JSON.stringify(data) }),
+  remove: (id: string) => request<void>(`/conversations/${id}`, { method: 'DELETE' }),
   orchestrations: (id: string) => request<any[]>(`/conversations/${id}/orchestrations`),
+  retryOrchestrationTask: (conversationId: string, runId: string, taskId: string) =>
+    request<any>(`/conversations/${conversationId}/orchestrations/${runId}/tasks/${taskId}/retry`, { method: 'POST' }),
 };
 
 export const messagesApi = {
@@ -68,7 +71,7 @@ export interface CreateAgentData {
   capabilities?: string[];
   systemPrompt?: string;
   adapterType: 'openai' | 'claude' | 'mimo' | 'claude-code-cli' | 'codex-cli' | 'opencode-cli';
-  model?: string;
+  model?: string | null;
   tools?: string[];
 }
 
@@ -85,8 +88,8 @@ export const settingsApi = {
     request(`/settings/providers/${provider}`, { method: 'PUT', body: JSON.stringify(data) }),
   testProvider: (provider: 'openai' | 'anthropic' | 'mimo') =>
     request<{ ok: boolean; model: string }>(`/settings/providers/${provider}/test`, { method: 'POST' }),
-  cliRuntimes: () => request<Array<{ runtimeType: 'claude-code' | 'codex' | 'opencode'; displayName: string; dockerImage: string; commandTemplate: string; envVarName: string; enabled: boolean; configured: boolean }>>('/settings/cli-runtimes'),
-  saveCliRuntime: (runtimeType: 'claude-code' | 'codex' | 'opencode', data: { displayName?: string; dockerImage?: string; commandTemplate?: string; envVarName?: string; enabled?: boolean; apiKey?: string }) =>
+  cliRuntimes: () => request<Array<{ runtimeType: 'claude-code' | 'codex' | 'opencode'; displayName: string; executablePath: string; envVarName: string; enabled: boolean; configured: boolean; localExecution: boolean }>>('/settings/cli-runtimes'),
+  saveCliRuntime: (runtimeType: 'claude-code' | 'codex' | 'opencode', data: { displayName?: string; executablePath?: string; envVarName?: string; enabled?: boolean; apiKey?: string; permissionProfile?: 'readonly' | 'safe_write' }) =>
     request(`/settings/cli-runtimes/${runtimeType}`, { method: 'PUT', body: JSON.stringify(data) }),
   testCliRuntime: (runtimeType: 'claude-code' | 'codex' | 'opencode') =>
     request<{ ok: boolean; output: string }>(`/settings/cli-runtimes/${runtimeType}/test`, { method: 'POST' }),
@@ -128,16 +131,22 @@ export const workspacesApi = {
     request<any>(`/workspaces/${id}`, { method: 'PATCH', body: JSON.stringify(data) }),
   tree: (id: string) => request<any[]>(`/workspaces/${id}/tree`),
   file: (id: string, filePath: string) => request<{ path: string; content: string; hash: string }>(`/workspaces/${id}/file?path=${encodeURIComponent(filePath)}`),
+  proposeFileChange: (id: string, filePath: string, baseHash: string, content: string, oldContent?: string) =>
+    approvalsApi.create({ type: 'apply_diff', title: `应用手工修改：${filePath}`, workspaceId: id, payload: { filePath, baseHash, content, oldContent } }),
+  proposeCommand: (id: string, command: string) =>
+    approvalsApi.create({ type: 'run_command', title: `运行本机命令：${command}`, workspaceId: id, payload: { command } }),
   importZip: (id: string, contentBase64: string) => request<any>(`/workspaces/${id}/import`, { method: 'POST', body: JSON.stringify({ contentBase64 }) }),
   exportZip: (id: string) => requestBlob(`/workspaces/${id}/export`),
   remove: (id: string) => request<void>(`/workspaces/${id}`, { method: 'DELETE' }),
 };
 
 export const agentRunsApi = {
+  list: () => request<any[]>('/agent-runs'),
   create: (data: { agentId: string; workspaceId: string; conversationId?: string; task: string; mode?: string; permissionProfile?: 'readonly' | 'safe_write' | 'autonomous'; model?: string }) =>
     request<any>('/agent-runs', { method: 'POST', body: JSON.stringify(data) }),
   get: (id: string) => request<any>(`/agent-runs/${id}`),
   cancel: (id: string) => request<any>(`/agent-runs/${id}/cancel`, { method: 'POST' }),
+  retry: (id: string) => request<any>(`/agent-runs/${id}/retry`, { method: 'POST' }),
 };
 
 export function connectSocket(): Socket {

@@ -2,7 +2,7 @@ import { Request, Response } from 'express'
 import httpProxy from 'http-proxy'
 import prisma from '../utils/prisma'
 import { AuthenticatedRequest, verifyPreviewToken } from '../middleware/auth'
-import { stopRuntime } from '../services/DockerSandboxExecutor'
+import { stopRuntime } from '../services/LocalProcessExecutor'
 import { emitToUser } from '../services/RealtimeHub'
 import { readFileContent } from '../services/WorkspaceFileService'
 
@@ -23,7 +23,13 @@ export async function createDeployment(req: AuthenticatedRequest, res: Response)
   if (workspaceId && !(await prisma.workspace.findFirst({ where: { id: workspaceId, userId: req.userId! } }))) return res.status(400).json({ error: 'Workspace not found' })
   if (type === 'fullstack' && !workspaceId) return res.status(400).json({ error: 'Full-stack deployment requires a workspace' })
   if (type === 'fullstack') {
-    try { await readFileContent(req.userId!, workspaceId, 'Dockerfile') } catch { return res.status(400).json({ error: 'Full-stack deployment requires a Dockerfile in the workspace root' }) }
+    try {
+      const packageFile = await readFileContent(req.userId!, workspaceId, 'package.json')
+      const parsed = JSON.parse(packageFile.content) as { scripts?: Record<string, string> }
+      if (!parsed.scripts?.start) throw new Error('Missing scripts.start')
+    } catch {
+      return res.status(400).json({ error: 'Local deployment requires package.json with scripts.start' })
+    }
   }
   const artifactVersion = type === 'static' && artifactId
     ? await prisma.artifactVersion.findFirst({ where: { artifactId, artifact: { userId: req.userId! } }, orderBy: { version: 'desc' } })
@@ -67,6 +73,8 @@ export async function stopDeployment(req: AuthenticatedRequest, res: Response) {
 export async function redeploy(req: AuthenticatedRequest, res: Response) {
   const deployment = await prisma.deployment.findFirst({ where: { id: req.params.id, userId: req.userId! } })
   if (!deployment) return res.status(404).json({ error: 'Deployment not found' })
+  if (deployment.type === 'static') return res.json(deployment)
+  if (deployment.type === 'fullstack') await stopRuntime(deployment.id)
   const updated = await prisma.deployment.update({ where: { id: deployment.id }, data: { status: 'queued', logs: '' } })
   emitToUser(req.userId!, 'deployment:state', updated)
   res.json(updated)

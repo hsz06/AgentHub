@@ -77,6 +77,140 @@
 
 ---
 
+## 产品目标与边界
+
+### 产品目标
+
+AgentHub 的产品目标是把 “调用单个大模型” 升级为 “在一个 IM 工作空间中组织多个 Agent 协作”。用户不需要理解各个 Agent 的底层调用方式，只需要像拉群聊天一样，把任务、上下文、文件和审批放进同一个会话中完成。
+
+P0 阶段重点验证四件事：
+
+1. **IM 是否是主入口**：用户能通过会话、消息、@Agent、引用回复和消息流完成任务沟通。
+2. **多 Agent 是否能协作**：同一个群聊中能有多个模型 Agent / CLI Agent，并由 Orchestrator 或 @ 提及触发不同 Agent。
+3. **产物是否回到聊天流**：代码 Diff、文档、网页预览、部署状态不是散落在后台，而是以内联卡片进入会话。
+4. **文件修改是否可控**：Agent 不能直接覆盖正式 workspace，必须先生成审批，再由用户确认写回。
+
+### 非目标
+
+以下能力不作为本课题 Demo 的核心验收范围：
+
+- 不做公网多租户生产平台，不承诺本机 Runner 是操作系统级安全沙箱。
+- 不做完整云端容器编排平台；本地 Demo 以本机 Node 项目启动和静态 Artifact 发布为主。
+- 不做移动端完整代码编辑器；移动端定位为查看会话、处理审批和预览产物。
+- 不把 Claude Code、Codex、OpenCode 的二进制复制到仓库，只读取用户本机已安装 CLI。
+
+---
+
+## 目标用户与核心场景
+
+|用户|痛点|AgentHub 提供的体验|
+|---|---|---|
+|前端开发者|需要快速生成页面并反复调整视觉细节|在单聊中让 Claude Code / 自建前端 Agent 修改 workspace，审批 Diff 后应用|
+|全栈开发者|需要同时处理前端、后端、构建和部署|在群聊中 @ 前端、后端、测试 Agent，Orchestrator 组织任务顺序|
+|产品 / 课程答辩者|需要展示从需求到产物的完整过程|聊天流保留需求、Agent 回复、审批、Artifact 和部署日志|
+|移动端审批者|不需要写代码，只需要确认产物和变更|移动端查看 Diff / Artifact，批准或拒绝变更|
+
+### 核心用户旅程
+
+#### 旅程 1：单 Agent 修改项目
+
+1. 用户创建 “Claude Code CLI 对话”。
+2. 在 Control Center 导入或创建 workspace，并绑定当前会话。
+3. 用户发送 “修改 README 或实现一个页面”。
+4. CLI Agent 在临时 workspace 副本中执行。
+5. 平台生成 Diff 审批卡片，正式 workspace 在审批前保持不变。
+6. 用户预览 Diff，批准后写回 workspace。
+
+#### 旅程 2：群聊多 Agent 协作
+
+1. 用户创建群聊，选择 Orchestrator、前端 Agent、后端 Agent、测试 Agent。
+2. 用户描述一个复杂任务，例如 “做一个任务管理网页，并补充测试和文档”。
+3. Orchestrator 按能力标签拆分任务，生成子任务。
+4. 各 Agent 在聊天流中依次产出方案、代码修改、评审意见和测试建议。
+5. Orchestrator 汇总状态，指出已完成项、失败项和需要用户审批的操作。
+
+#### 旅程 3：产物预览与交付
+
+1. Agent 生成 Web / Document / Slides / Code Artifact。
+2. 聊天流和控制中心展示 Artifact 卡片。
+3. 桌面 Web 可预览、编辑并保存 Artifact 版本。
+4. 移动端默认只读预览，保留下载、审批和查看部署状态。
+5. 用户可发布静态 Artifact 或启动本机 Node 预览。
+
+---
+
+## 信息架构
+
+```text
+AgentHub
+├─ 会话区
+│  ├─ 单聊 / 群聊
+│  ├─ 消息流 / @Agent / 引用回复
+│  └─ Diff / Artifact / Deployment 内联卡片
+├─ 工作台
+│  ├─ Workspace 文件树
+│  ├─ Monaco 代码预览 / 编辑
+│  └─ 手工修改审批
+├─ 控制中心
+│  ├─ 模型服务配置
+│  ├─ CLI Runtime 配置
+│  ├─ Workspace 管理
+│  ├─ Artifact 管理
+│  ├─ 审批队列
+│  ├─ 部署管理
+│  └─ Agent 运行日志
+└─ Agent 配置
+   ├─ 内置 Agent
+   ├─ 自建模型 Agent
+   └─ 本机 CLI Agent
+```
+
+核心对象关系：
+
+```text
+User
+  → Conversation
+  → Message
+  → Mentioned Agent / Orchestrator Task
+  → Workspace Temporary Copy
+  → ToolApproval
+  → Artifact / Deployment
+```
+
+这套关系保证所有关键产物都能回到 IM 上下文中，便于答辩时解释 “用户需求如何转成 Agent 动作，再如何回到可审查产物”。
+
+---
+
+## 功能优先级与验收口径
+
+|优先级|范围|验收标准|
+|---|---|---|
+|P0|IM 会话、Agent 单聊、@ 提及、Provider 配置、Workspace 绑定、CLI Runtime、本机审批 Diff|用户能完成 “发消息 → Agent 回复 → 修改文件 → 审批写回” 的完整闭环|
+|P1|群聊 Orchestrator、自建 Agent 配置、Artifact 预览、Monaco 工作台、部署日志|用户能在群聊中组织多个 Agent，并在聊天流 / 控制中心查看产物|
+|P2|移动端轻量体验、桌面端本地能力、Slides / PPTX、部署发布增强|用户能在窄屏和桌面壳中完成查看、审批和导出|
+
+验收时不只看界面是否存在，还要检查链路是否真实可跑：
+
+- 会话消息是否持久化，刷新后是否保留。
+- `@Agent` 是否能携带 `mentionedAgentIds` 触发对应 Agent。
+- Agent 修改文件前后是否生成 Diff，并且审批前正式 workspace 不变。
+- Artifact 是否有版本、预览和下载入口。
+- 本机部署是否有启动、日志、访问 URL、停止和重新部署状态。
+
+---
+
+## 考察要点映射
+
+|考察维度|产品侧对应设计|
+|---|---|
+|AI 协作能力|沉淀《AI 协作开发记录》中的 Spec、rules、prompt 模板和验收规则；产品内也用 Orchestrator 体现任务拆解能力|
+|功能完整度|IM 会话、多 Agent 接入、群聊调度、Workspace、审批、Artifact 和部署组成完整闭环|
+|生成效果质量|桌面 Web 强调聊天可读性、工作台、Artifact 预览；移动端强调轻量审批和产物查看|
+|代码理解度|技术文档需要解释 IM → Orchestrator → Adapter → Runner → Approval → Artifact 的主链路|
+|创新与产品感|把 Coding Agent 包装成 IM 联系人，把文件修改变成可审查 Diff，把产物和部署状态内联到聊天流|
+
+---
+
 ## 考察要点
 
 |维度|权重|评判要点|
@@ -89,5 +223,15 @@
 
 **交付物**：产品设计文档 \+ 技术文档 \+ 可运行 Demo \+ AI 协作开发记录  \+ 3 分钟 Demo 视频
 
+---
 
+## 详细交付材料目录
+
+为便于评审和答辩，三类文字交付物已拆成独立目录：
+
+|交付物|详细目录|说明|
+|---|---|---|
+|产品设计文档|`docs/product-design/`|产品定位、用户旅程、功能范围和验收口径|
+|技术文档|`docs/technical-design/`|总体架构、核心流程、Runtime、安全边界和数据模型|
+|AI 协作开发记录|`docs/ai-collaboration/`|协作规则、Prompt 模板、开发日志和评分证据|
 

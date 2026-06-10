@@ -1,68 +1,49 @@
-# AgentHub Full-Flow Architecture
+# AgentHub Local Runner Architecture
 
 ## Runtime Layout
 
-- `web`: React/PWA client for chat, artifacts, workspaces, approvals, and deployments.
-- `api`: Express, Socket.io, Prisma, JWT authentication, BYOK encryption, preview proxy.
-- `worker`: the only Compose service mounting the Docker socket; consumes approved command and full-stack deployment queues.
-- `electron`: loads the Web UI and exposes controlled directory import, artifact export, and notification APIs.
+- `web`: React/PWA 客户端，提供聊天、Artifact、Workspace、审批和部署管理。
+- `api`: Express、Socket.io、Prisma、JWT、BYOK 加密和预览代理。
+- `worker`: 独立本机进程，消费 CLI Agent、白名单命令和本机项目部署队列。
+- `electron`: Web UI 桌面壳，提供目录副本导入、Artifact 导出和通知。
 
-SQLite and managed workspace data are persisted in Docker volumes for the local acceptance environment.
+SQLite 和受管 workspace 保存于本机目录。API 与 Worker 必须运行在同一台 Linux 主机。
 
 ## Security Boundaries
 
-- Provider keys saved through the UI are encrypted with AES-256-GCM using `ENCRYPTION_KEY`; API responses expose only configured state. Backend environment variables can supply provider defaults for local smoke tests or single-user demos, while database BYOK takes precedence.
-- Every Agent, conversation, workspace, artifact, approval, and deployment query is scoped to `userId`.
-- ZIP import is extracted only under the managed workspace root with traversal checks, entry limits, and size limits.
-- Model-generated writes, commands, and deployments become approvals. The API never runs generated shell commands.
-- Only allowlisted commands are queued: `npm install`, `npm run build`, `npm test`, `npm run test`, `npm run lint`.
-- Full-stack deployment requires a root `Dockerfile`; Docker execution occurs in `worker` with CPU, memory, PID, read-only filesystem, and no-new-privileges controls.
-- Static publication pins an exact `ArtifactVersion`. Preview iframes have no same-origin permission and apply restrictive CSP.
+- 本机 Runner 适用于受信任的本地 Demo，不是操作系统级沙箱，不用于公网多租户部署。
+- CLI Agent 只在临时 workspace 副本中运行。文件变化转换为 Diff Approval，批准后才写回正式 workspace。
+- Runtime 参数由服务端固定生成。Control Center 只能设置 executable path、启用状态、权限档位和可选 API Key。
+- 白名单命令使用固定参数直接执行，不经过 Shell：`npm install`、`npm run build`、`npm test`、`npm run test`、`npm run lint`。
+- 本机项目部署仅执行 `npm run start`，要求 `package.json` 包含 `scripts.start`。
+- 所有 Agent、conversation、workspace、artifact、approval 和 deployment 查询按 `userId` 隔离。
+- Web 预览 iframe 没有同源权限，并使用严格 CSP。
 
-## REST API
+## Local CLI Runtime
 
-| Area | Endpoints |
-| --- | --- |
-| Auth | `/api/auth/register`, `/login`, `/me` |
-| Providers | `/api/settings/providers`, `/api/settings/providers/:provider/test` |
-| Chat | `/api/agents`, `/api/conversations`, `/api/messages` |
-| Orchestration | `/api/conversations/:id/orchestrations` |
-| Workspaces | `/api/workspaces`, `/:id/tree`, `/:id/file`, `/:id/import`, `/:id/export` |
-| Artifacts | `/api/artifacts`, `/:id/versions`, `/:id/download`, `/:id/export/pptx` |
-| Approvals | `/api/approvals`, `/:id/resolve` |
-| Deployments | `/api/deployments`, `/:id/logs`, `/:id/stop`, `/:id/redeploy` |
+Runtime executable path 优先级：
+
+1. 用户保存的 `executablePath`。
+2. `CLAUDE_CODE_BIN`、`CODEX_BIN`、`OPENCODE_BIN`。
+3. 系统 `PATH` 中的 `claude`、`codex`、`opencode`。
+
+Claude Code 使用 `-p` 非交互执行和 `stream-json` 输出。默认复用本机 OAuth 登录；配置 API Key 时使用独立 Key 覆盖。`readonly` 仅开放读取工具，`safe_write` 开放临时副本中的读取和编辑工具。宿主机模式不允许 `autonomous`。
+
+## Deployment
+
+静态 Web Artifact 发布固定版本，并返回受 Token 保护的预览 URL。
+
+本机项目部署流程：
+
+1. 用户提前审批执行 `npm install`。
+2. 创建 fullstack deployment，并审批本机启动。
+3. Worker 分配空闲端口，设置 `HOST=127.0.0.1` 和 `PORT`，执行 `npm run start`。
+4. Worker 持久化 PID 和日志，等待端口就绪。
+5. API 通过受 Token 保护的 runtime proxy 暴露预览 URL。
+6. Stop 终止进程组；Redeploy 停止旧进程后重新排队。
 
 ## Socket Protocol
 
-Client events:
+客户端事件：`conversation:join`、`message:send`、`message:regenerate`、`orchestration:cancel`。
 
-- `conversation:join`
-- `message:send`
-- `message:regenerate`
-- `orchestration:cancel`
-
-Server events:
-
-- `message:created`, `message:chunk`, `message:completed`
-- `orchestration:state`, `task:state`
-- `tool:approval-created`, `tool:result`
-- `deployment:state`
-- `error`
-
-Docker worker status is persisted to deployments/logs and refreshed by clients because the worker is intentionally isolated from the API Socket process.
-
-## Agent Tools
-
-Agents are provided only their configured permission set. Tool proposals use a fenced JSON envelope:
-
-````text
-```agenthub-tool
-{"tool":"propose_file_change","workspaceId":"...","filePath":"src/app.ts","baseHash":"...","content":"..."}
-```
-````
-
-Read tools, `list_workspace_files` and `read_workspace_file`, execute automatically after permission validation and feed results back to the Agent. `propose_file_change`, `propose_command`, and `propose_deployment` always produce approval records. A conflicting file base creates a model-assisted merge candidate that still requires approval.
-
-## Orchestration
-
-A group request creates an `OrchestrationRun`. The lead Agent attempts to produce a JSON task dependency graph; a deterministic independent-task fallback is used if planning is unavailable. Ready tasks execute in parallel, dependency outputs are supplied downstream, task states persist, and a summary message closes the run. Tasks containing approval proposals transition to `waiting_approval`, and resolution messages are inserted into the conversation audit trail.
+服务端事件：`message:created`、`message:chunk`、`message:completed`、`orchestration:state`、`task:state`、`tool:approval-created`、`tool:result`、`deployment:state`。

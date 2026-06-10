@@ -14,6 +14,7 @@ import deploymentsRouter from './routes/deployments'
 import workspacesRouter from './routes/workspaces'
 import agentRunsRouter from './routes/agentRuns'
 import { AgentManager } from './services/agents/AgentManager'
+import { initializeDatabase } from './utils/prisma'
 
 dotenv.config()
 
@@ -61,12 +62,20 @@ app.use((err: Error, req: Request, res: Response, next: NextFunction) => {
 const httpServer = http.createServer(app)
 setupSocketIO(httpServer)
 
-httpServer.listen(PORT, async () => {
-  console.log(`🚀 Server is running on http://localhost:${PORT}`)
-  try {
-    await AgentManager.getInstance().initializeFromDatabase()
-    console.log('✅ AgentManager initialized from database')
-  } catch (e) {
-    console.warn('AgentManager initialization skipped', e)
-  }
+async function start() {
+  await initializeDatabase()
+  httpServer.listen(PORT, async () => {
+    console.log(`🚀 Server is running on http://localhost:${PORT}`)
+    try {
+      await AgentManager.getInstance().initializeFromDatabase()
+      console.log('✅ AgentManager initialized from database')
+    } catch (e) {
+      console.warn('AgentManager initialization skipped', e)
+    }
+  })
+}
+
+void start().catch(error => {
+  console.error('Server startup failed', error)
+  process.exitCode = 1
 })

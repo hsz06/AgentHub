@@ -5,7 +5,8 @@ import {
   createConversation,
   updateConversation,
   deleteConversation,
-  getOrchestrationRuns
+  getOrchestrationRuns,
+  retryOrchestrationTask
 } from '../controllers/ConversationController'
 import { requireAuth } from '../middleware/auth'
 
@@ -15,6 +16,7 @@ router.use(requireAuth)
 router.get('/', getConversations)
 router.get('/:id', getConversationById)
 router.get('/:id/orchestrations', getOrchestrationRuns)
+router.post('/:id/orchestrations/:runId/tasks/:taskId/retry', retryOrchestrationTask)
 router.post('/', createConversation)
 router.put('/:id', updateConversation)
 router.delete('/:id', deleteConversation)

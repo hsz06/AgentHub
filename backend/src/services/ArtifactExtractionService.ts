@@ -64,18 +64,19 @@ export async function attachGeneratedArtifacts(userId: string, messageId: string
       : null
     if ((proposal.tool === 'propose_file_change' || proposal.tool === 'propose_command' || proposal.tool === 'propose_deployment') && !workspace) continue
     if (proposal.tool === 'propose_file_change' && proposal.filePath && proposal.content !== undefined) {
+      const previous = await readFileContent(userId, workspace!.id, proposal.filePath).catch(() => null)
       const approval = await prisma.toolApproval.create({
         data: {
           userId,
           workspaceId: workspace!.id,
           type: 'apply_diff',
           title: `Apply Agent change to ${proposal.filePath}`,
-          payload: JSON.stringify({ filePath: proposal.filePath, baseHash: proposal.baseHash, content: proposal.content, ...origin, sourceMessageId: messageId })
+          payload: JSON.stringify({ filePath: proposal.filePath, baseHash: proposal.baseHash, content: proposal.content, oldContent: previous?.content || '', ...origin, sourceMessageId: messageId })
         }
       })
       emitToUser(userId, 'tool:approval-created', approval)
       approvalCreated = true
-      cards.push({ type: 'code-diff', title: proposal.filePath, description: 'Awaiting approval', data: { approvalId: approval.id, oldCode: '', newCode: proposal.content, fileName: proposal.filePath } })
+      cards.push({ type: 'code-diff', title: proposal.filePath, description: 'Awaiting approval', data: { approvalId: approval.id, oldCode: previous?.content || '', newCode: proposal.content, fileName: proposal.filePath } })
     }
     if (proposal.tool === 'propose_command' && proposal.command) {
       if (!isAllowedCommand(proposal.command)) continue

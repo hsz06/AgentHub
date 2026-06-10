@@ -1,5 +1,5 @@
 import { Agent } from '@prisma/client'
-import prisma from '../../utils/prisma'
+import prisma, { withDatabaseRetry } from '../../utils/prisma'
 import { BaseAgent, ChatOptions, Message } from './BaseAgent'
 
 const CLI_ADAPTERS = ['claude-code-cli', 'codex-cli', 'opencode-cli']
@@ -30,6 +30,7 @@ export class CliAgent extends BaseAgent {
     if (!workspaceId) throw new Error('CLI Agent requires a managed workspace attached to this conversation. Create or import a workspace in Control Center, then bind it to the current conversation.')
 
     const prompt = messages.map(message => `${message.role.toUpperCase()}:\n${message.content}`).join('\n\n')
+    if (!prompt.trim()) throw new Error('CLI Agent context is empty')
     const run = await prisma.cliRun.create({
       data: {
         userId: this.userId,
@@ -46,7 +47,7 @@ export class CliAgent extends BaseAgent {
     const started = Date.now()
     const timeoutMs = Number(process.env.CLI_AGENT_WAIT_TIMEOUT_MS || 10 * 60 * 1000)
     while (Date.now() - started < timeoutMs) {
-      const current = await prisma.cliRun.findUnique({ where: { id: run.id } })
+      const current = await withDatabaseRetry(() => prisma.cliRun.findUnique({ where: { id: run.id } }))
       if (!current) throw new Error('CLI run disappeared')
       if (current.stdout.length > seen) {
         const chunk = current.stdout.slice(seen)
@@ -57,7 +58,13 @@ export class CliAgent extends BaseAgent {
         if (current.status === 'completed' && options.messageId) {
           await attachDiffCards(options.messageId, current.diffSummary)
         }
-        const output = [current.stdout, current.stderr ? `\n\nSTDERR:\n${current.stderr}` : '', current.result ? `\n\n${current.result}` : ''].join('')
+        const stdout = current.stdout.trim()
+        const shouldShowResult = !stdout || !current.result?.includes('CLI completed with no file changes.')
+        const output = [
+          stdout,
+          current.stderr ? `\n\nSTDERR:\n${current.stderr}` : '',
+          shouldShowResult && current.result ? `\n\n${current.result}` : ''
+        ].join('')
         if (current.status === 'failed') throw new Error(output.trim() || 'CLI Agent failed')
         return output.trim() || 'CLI Agent completed with no output.'
       }
@@ -77,7 +84,7 @@ export class CliAgent extends BaseAgent {
 }
 
 async function attachDiffCards(messageId: string, diffSummary: string) {
-  let changes: Array<{ filePath: string; approvalId: string }> = []
+  let changes: Array<{ filePath: string; approvalId: string; oldCode: string; newCode: string }> = []
   try { changes = JSON.parse(diffSummary || '[]') } catch { changes = [] }
   if (!changes.length) return
   await prisma.message.update({
@@ -88,7 +95,7 @@ async function attachDiffCards(messageId: string, diffSummary: string) {
           type: 'code-diff',
           title: change.filePath,
           description: 'CLI generated change awaiting approval',
-          data: { approvalId: change.approvalId, fileName: change.filePath, oldCode: '', newCode: '' }
+          data: { approvalId: change.approvalId, fileName: change.filePath, oldCode: change.oldCode, newCode: change.newCode }
         }))
       })
     }

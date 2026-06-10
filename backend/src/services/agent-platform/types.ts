@@ -51,19 +51,17 @@ export type AgentEvent =
   | { type: 'run_failed'; error: string }
 
 export interface RunnerCommand {
-  image: string
-  command: string
+  executablePath: string
+  args: string[]
   env: Record<string, string>
-  network: 'none' | 'bridge'
 }
 
 export interface AgentAdapter {
   provider: AgentProvider
   buildCommand(request: AgentRunRequest, runtime: {
-    dockerImage: string
-    commandTemplate: string
+    executablePath: string
     envVarName: string
-    apiKey: string
+    apiKey?: string
   }): RunnerCommand
   normalizeStdout(text: string, runId: string): AgentEvent[]
   normalizeStderr(text: string, runId: string): AgentEvent[]

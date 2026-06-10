@@ -11,7 +11,7 @@ export interface Agent {
   description?: string | null;
   capabilities: string | string[];
   systemPrompt?: string | null;
-  adapterType: 'openai' | 'claude' | 'mimo';
+  adapterType: 'openai' | 'claude' | 'mimo' | 'claude-code-cli' | 'codex-cli' | 'opencode-cli';
   model?: string | null;
   tools?: string | string[];
   isBuiltin: boolean;
@@ -95,4 +95,31 @@ export interface Approval {
   title: string;
   status: string;
   createdAt: string;
+}
+
+export interface Workspace {
+  id: string;
+  name: string;
+  rootPath: string;
+  conversationId?: string | null;
+  updatedAt: string;
+}
+
+export interface WorkspaceFile {
+  path: string;
+  type: 'file' | 'directory';
+  size?: number;
+}
+
+export interface WorkspaceFileContent {
+  path: string;
+  content: string;
+  hash: string;
+}
+
+export interface CliDiffSummary {
+  filePath: string;
+  approvalId: string;
+  oldCode: string;
+  newCode: string;
 }

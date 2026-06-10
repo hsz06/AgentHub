@@ -54,6 +54,7 @@ model CliRuntimeConfig {
   runtimeType     String
   displayName     String
   dockerImage     String
+  executablePath  String?
   commandTemplate String
   enabled         Boolean  @default(false)
   encryptedApiKey String?
@@ -244,6 +245,7 @@ model Deployment {
   previewUrl  String?
   logs        String   @default("")
   containerId String?
+  runtimePid  Int?
   exposedPort Int?
   runtimeUrl  String?
   userId      String

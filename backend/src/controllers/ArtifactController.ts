@@ -100,14 +100,19 @@ export async function exportSlides(req: AuthenticatedRequest, res: Response) {
   })
   if (!artifact?.versions[0]) return res.status(404).json({ error: 'Slides artifact not found' })
   try {
-    const parsed = JSON.parse(artifact.versions[0].content) as { slides?: Array<{ title?: string; body?: string; background?: string }> }
+    const parsed = JSON.parse(artifact.versions[0].content) as { slides?: Array<{ title?: string; body?: string; background?: string; image?: string }> }
     const pptx = new PptxGenJS()
     pptx.layout = 'LAYOUT_WIDE'
     for (const entry of parsed.slides || []) {
       const slide = pptx.addSlide()
       if (entry.background) slide.background = { color: entry.background.replace('#', '') }
       slide.addText(entry.title || '', { x: 0.65, y: 0.7, w: 12, h: 0.7, fontSize: 28, bold: true, color: '17233B' })
-      slide.addText(entry.body || '', { x: 0.65, y: 1.75, w: 12, h: 4.5, fontSize: 18, color: '344054', valign: 'top' })
+      if (entry.image && isPptxDataImage(entry.image)) {
+        slide.addImage({ data: entry.image, x: 0.85, y: 1.62, w: 5.2, h: 3.9 })
+        slide.addText(entry.body || '', { x: 6.35, y: 1.75, w: 6.1, h: 4.5, fontSize: 18, color: '344054', valign: 'top' })
+      } else {
+        slide.addText(entry.body || '', { x: 0.65, y: 1.75, w: 12, h: 4.5, fontSize: 18, color: '344054', valign: 'top' })
+      }
     }
     if (!parsed.slides?.length) pptx.addSlide().addText('Untitled presentation', { x: 1, y: 1, w: 10, h: 1, fontSize: 28 })
     const output = await pptx.write({ outputType: 'nodebuffer' }) as Buffer
@@ -116,4 +121,8 @@ export async function exportSlides(req: AuthenticatedRequest, res: Response) {
   } catch {
     res.status(400).json({ error: 'Slides content must be valid slide JSON' })
   }
+}
+
+function isPptxDataImage(value: string) {
+  return /^data:image\/(png|jpe?g);base64,/i.test(value)
 }

@@ -2,6 +2,12 @@
 
 > 基于课题《AgentHub - 多 Agent 协作平台》整理。本文档面向可运行 Demo 与答辩交付，重点说明系统架构、IM 消息模型、Coding Agent Runtime Adapter、Orchestrator 调度、产物 Artifact 模型、审批安全边界、Runner 沙箱与 P0/P1/P2 开发计划。
 
+详细技术分册见 `docs/technical-design/`：
+
+- `01-architecture-overview.md`：总体架构、模块边界、关键设计决策。
+- `02-core-flows.md`：消息、Orchestrator、CLI Runtime、审批、Artifact、部署核心流程。
+- `03-runtime-security-and-data.md`：数据模型、Runner 安全边界、配置、风险和答辩索引。
+
 ---
 
 ## 1. 项目定位
@@ -74,17 +80,17 @@ flowchart TD
 | Workspace Service | 管理受控 workspace、ZIP 导入导出、文件树、文件读取、版本修订 |
 | Artifact Service | 管理代码、Diff、网页、文件、部署状态等产物 |
 | Approval Service | 所有文件写入、命令执行、部署发布都先生成审批，批准后才应用 |
-| Runner / Sandbox | 隔离执行 Agent 任务，在临时 workspace 副本中运行并收集 diff |
-| Deploy Service | 静态预览发布、Docker 全栈部署、部署状态与日志 |
+| Local Runner | 在临时 workspace 副本中执行 Agent 任务并收集 diff |
+| Deploy Service | 静态预览发布、本机 Node 项目预览、部署状态与日志 |
 
 ### 2.2 当前实现边界
 
-当前实现采用本地 Docker Compose 交付形态：
+当前实现采用受信任主机上的本机 Demo 交付形态：
 
 - API 服务负责认证、IM、Agent、Artifact、Approval、Deployment、Workspace 等 REST/Socket 接口。
-- Worker 服务负责 Docker 相关执行，包括 CLI Agent Runtime、白名单命令和全栈部署。
+- 独立 Worker 进程负责 CLI Agent Runtime、白名单命令和本机 Node 项目预览。
 - Web/PWA 复用同一前端，Electron 作为受控桌面壳，负责本地目录压缩导入、导出和系统通知。
-- 首期数据库使用 SQLite 持久化 volume；后续云端部署可迁移 PostgreSQL。
+- 首期数据库使用 SQLite；后续云端部署可迁移 PostgreSQL。
 - CLI Agent 不直接修改正式 workspace，而是在临时副本中运行，执行后由平台计算 diff 并创建审批。
 
 ---
@@ -780,25 +786,25 @@ export async function buildAgentContext(options: ContextBuildOptions): Promise<A
 | safe_write | 工作区可写 | allowlist | 可选 allowlist | 代码生成、修复测试 |
 | autonomous | 工作区可写 | 允许 | 可选允许 | Demo 自动化，但必须隔离运行 |
 
-### 10.2 Runner 隔离
+### 10.2 本机 Runner 边界
 
-P0 推荐 Docker Runner：
+P0 使用受信任主机上的本机 Runner：
 
 ```text
 每个 Agent Run 从正式 workspace 复制出独立临时 workspace
-临时 workspace 挂载到容器内 /workspace
-容器内注入最小必要环境变量
+CLI 仅在临时 workspace 中执行
+子进程注入最小必要环境变量
 执行结束后收集 diff、日志、产物
 文件变更转 ToolApproval，批准后才写回正式 workspace
-默认不把宿主机敏感目录挂载进去
+本机模式不是操作系统级沙箱，不用于公网多租户部署
 ```
 
 Runner 的安全边界：
 
 1. API 服务不直接运行外部 CLI。
-2. Worker 是唯一执行 Docker/CLI 的服务。
-3. CLI 容器只挂载临时 workspace，不挂载用户原目录。
-4. Docker socket 只给 Worker 使用；生产环境建议替换为更强隔离的远程 runner、Kubernetes Job 或 Firecracker。
+2. Worker 是唯一执行本机 CLI 的服务。
+3. CLI 只操作临时 workspace，不直接操作用户原目录。
+4. 生产环境必须替换为更强隔离的远程 runner、Kubernetes Job 或 Firecracker。
 5. 所有写文件、跑命令、部署动作都必须经过审批或配置化权限档位。
 
 ### 10.3 命令 allowlist
@@ -1073,7 +1079,7 @@ CREATE TABLE artifacts (
 | TypeScript | 与前端共享类型 |
 | SQLite / PostgreSQL | 本地 Demo / 未来云端数据存储 |
 | Prisma | ORM 与迁移 |
-| Docker | Runner 隔离 |
+| 本机 Worker | 受信任主机上的 Demo Runner |
 | BullMQ / Redis | P1 任务队列 |
 | S3 / 本地文件系统 | Artifact 存储 |
 
@@ -1092,7 +1098,7 @@ CREATE TABLE artifacts (
 
 ### P0：可运行 Demo
 
-目标：完成核心链路，能展示 IM 聊天、Claude Code/Codex 接入、基础 Artifact、Diff 审批和本地 Docker Compose 运行。
+目标：完成核心链路，能展示 IM 聊天、Claude Code/Codex 接入、基础 Artifact、Diff 审批和本机进程运行。
 
 | 模块 | 功能 |
 |---|---|
@@ -1101,7 +1107,7 @@ CREATE TABLE artifacts (
 | Runtime | `AgentRunRequest -> AgentEvent` 统一接口、事件归一化、CliRun 持久化 |
 | Orchestrator 简版 | @ Agent 指定、基础任务拆解、顺序/并行执行、聚合总结 |
 | Artifact | Web/Code/Document/Slides/Attachment、版本历史、Diff 卡片 |
-| Runner | Docker Worker、临时 workspace 副本、diff capture、审批后应用 |
+| Runner | 本机 Worker、临时 workspace 副本、diff capture、审批后应用 |
 | Demo 场景 | “导入 workspace → Claude Code 生成 → Codex Review → Diff 审批 → 预览/部署” |
 
 P0 验收标准：
@@ -1112,7 +1118,7 @@ P0 验收标准：
 4. Agent 回复能流式显示在聊天窗口。
 5. 若产生文件修改，系统创建 Diff Approval，批准后正式 workspace 才变化。
 6. 群聊中能 @ 两个 Agent，Orchestrator 能顺序调用并汇总。
-7. CLI runtime 的 Docker 镜像、命令模板、独立 API Key 可在控制台配置和测试。
+7. CLI runtime 的 executable path、权限档位、可选独立 API Key 可在控制台配置和测试。
 
 ### P1：完整产品体验
 
@@ -1183,15 +1189,86 @@ Orchestrator：任务完成。你可以在下方预览网页。
 
 ---
 
-## 17. 风险与应对
+## 17. 考察要点实现映射
+
+本节用于把产品设计文档中的评分维度映射到当前工程实现，答辩时可以按 “需求 → 架构 → 代码入口 → 验证方式” 说明。
+
+### 17.1 AI 协作能力：Spec / Rules / Skill 沉淀
+
+|要求|工程体现|代码 / 文档入口|
+|---|---|---|
+|需求 Spec|产品文档定义 IM、多 Agent、产物、审批和多端范围|`AgentHub- 多Agent协作平台设计.md`|
+|技术 Spec|技术文档定义服务边界、数据模型、Runtime、审批和部署链路|`AgentHub-技术架构设计.md`|
+|协作 Rules|记录 AI 编码边界、Runner 安全规则、验收规则|`docs/ai-collaboration-record.md`|
+|可复用 Prompt|沉淀 Coding Agent、Review Agent、Orchestrator 模板|`docs/ai-collaboration-record.md`|
+|验收清单|按功能链路记录已完成项和剩余风险|`docs/acceptance-checklist.md`|
+
+AI 协作不是只用 AI 写代码，而是把需求拆成可验收切片，并把规则沉淀成后续 Agent 可以复用的上下文。
+
+### 17.2 功能完整度：IM 与多 Agent 调度
+
+|能力|实现说明|核心入口|
+|---|---|---|
+|会话与消息|Socket 处理消息发送、流式更新、失败回写和 Agent 回复|`backend/src/sockets/index.ts`|
+|上下文构建|按 token 预算拼接历史消息、pin 消息和 workspace 信息|`backend/src/services/ContextService.ts`|
+|模型 Agent|通过 Provider 配置和 Agent adapter 调用 OpenAI 兼容接口|`backend/src/services/AgentRuntime.ts`|
+|CLI Agent|通过本机 executable path 启动 Claude Code / Codex / OpenCode|`backend/src/services/agents/CliAgent.ts`|
+|群聊调度|Orchestrator 创建 run / task，按 Agent 能力分派并聚合状态|`backend/src/services/Orchestrator.ts`|
+|前端 IM|会话列表、消息流、@Agent、输入框、工作台和控制中心|`frontend/src/pages/ChatPage.tsx`|
+
+P0 验收链路是：
+
+```text
+用户消息
+  → Socket message:send
+  → ContextService 构建上下文
+  → AgentRuntime / CliAgent 执行
+  → 消息流式回写
+  → Diff / Artifact / Approval 卡片进入聊天流
+```
+
+### 17.3 生成效果质量：UI、Artifact 与工作台
+
+|体验点|实现说明|核心入口|
+|---|---|---|
+|聊天 UI|桌面端聊天主区保持可读宽度，工作台默认按需打开|`frontend/src/index.css`, `frontend/src/pages/ChatPage.tsx`|
+|@Agent 提示|全局 Agent 列表参与提示，当前会话成员置顶|`frontend/src/components/MessageInput.tsx`|
+|Agent 配置|内置 Agent 只读，自建 Agent 可配置 Provider、模型、Prompt 和工具|`frontend/src/components/AgentContactList.tsx`|
+|代码工作台|Workspace 文件树、文件读取、Monaco 编辑、手工修改审批|`frontend/src/components/WorkspaceWorkbench.tsx`|
+|Artifact 预览|Web iframe、Markdown、Slides、Code / Attachment 只读预览|`frontend/src/components/ArtifactEditorModal.tsx`|
+|控制中心|Provider、CLI Runtime、Workspace、Artifact、Approval、Deployment、Run 管理|`frontend/src/components/ControlCenterModal.tsx`|
+
+生成质量的重点不是单个页面好看，而是 “Agent 产物可以被看见、编辑、审批、下载和部署”。
+
+### 17.4 代码理解度：核心链路说明
+
+答辩时建议按以下顺序解释核心逻辑：
+
+1. **为什么用 IM**：IM 会话天然承载上下文、参与者、消息顺序和多轮协作。
+2. **为什么抽 Agent Adapter**：模型 Agent、Claude Code、Codex、OpenCode 的调用方式不同，但平台只关心统一事件和最终产物。
+3. **为什么用临时 workspace**：本机 Demo 不能直接让 CLI 修改正式目录，临时副本 + Diff 审批让风险可见。
+4. **为什么审批是核心模型**：文件写入、命令执行、部署启动都可以统一成 `ToolApproval`。
+5. **为什么 Artifact 独立建模**：聊天消息是过程，Artifact 是可版本化、可下载、可预览的交付物。
+
+### 17.5 创新与产品感：超出普通 Chatbot 的部分
+
+- **Agent 即联系人**：用户不需要选择复杂后端服务，只需要在聊天里选择或 @ 一个 Agent。
+- **群聊式协作**：Orchestrator 把复杂任务拆成多个 Agent 子任务，过程在聊天流中可追踪。
+- **安全可审查写入**：CLI Agent 可以真实操作代码，但正式 workspace 只接受审批后的 Diff。
+- **产物内联**：Diff、网页预览、文档、部署状态作为卡片进入聊天流，不需要跳出当前工作上下文。
+- **本机 Runner Demo**：复用用户已登录的 Claude Code CLI，降低演示部署门槛，同时明确不是生产沙箱。
+
+---
+
+## 18. 风险与应对
 
 | 风险 | 应对 |
 |---|---|
 | 不同 Agent 输出格式差异大 | 强制通过 Adapter 转成 AgentEvent |
 | Agent 运行时间长 | 加 timeout、任务队列、取消机制 |
 | 文件修改不可控 | Runner 沙箱、权限档位、Diff 审核 |
-| CLI 运行环境不一致 | 提供 Claude Code / Codex runner Dockerfile，运行前做 runtime test |
-| Docker socket 权限过大 | Demo 可用，生产改为远程 Runner / Kubernetes Job / Firecracker |
+| CLI 运行环境不一致 | 配置本机 executable path，运行前做 runtime test |
+| 本机 Runner 隔离不足 | 仅用于可信本地 Demo，生产改为远程 Runner / Kubernetes Job / Firecracker |
 | workspace 与会话未绑定 | Workspace Service 提供会话绑定能力，CLI Agent 无 workspace 时明确报错 |
 | 群聊调度复杂 | P0 先做规则分派，P1 再做智能规划 |
 | 预览环境不稳定 | P0 先支持静态 HTML/React 构建预览 |
@@ -1200,13 +1277,13 @@ Orchestrator：任务完成。你可以在下方预览网页。
 
 ---
 
-## 18. 答辩讲解重点
+## 19. 答辩讲解重点
 
-### 18.1 一句话介绍
+### 19.1 一句话介绍
 
 AgentHub 是一个以 IM 聊天为核心交互方式的多 Agent 协作平台，用户可以像拉群聊天一样让 Claude Code、Codex、OpenCode 等 Agent 分工协作生成代码、网页和文档产物。
 
-### 18.2 技术亮点
+### 19.2 技术亮点
 
 1. **统一 Coding Agent Runtime Adapter**：屏蔽 Claude Code、Codex、OpenCode 的调用、事件和权限差异。
 2. **事件流驱动 IM 体验**：Agent 执行过程实时转成聊天消息。
@@ -1214,7 +1291,7 @@ AgentHub 是一个以 IM 聊天为核心交互方式的多 Agent 协作平台，
 4. **Artifact 内联产物**：代码、Diff、网页预览都能在聊天流中展示。
 5. **Runner 沙箱 + 审批隔离**：Agent 只修改临时 workspace，正式 workspace 只接受用户批准后的 Diff。
 
-### 18.3 推荐答辩架构图
+### 19.3 推荐答辩架构图
 
 ```text
 IM Chat UI
@@ -1236,7 +1313,7 @@ Artifact: Text / Code / Diff / Preview / Deploy
 
 ---
 
-## 19. 结论
+## 20. 结论
 
 AgentHub 的关键不是简单调用多个大模型，而是把多个 Coding Agent 抽象成统一的运行时，并用 IM 消息流承载它们的协作过程。
 

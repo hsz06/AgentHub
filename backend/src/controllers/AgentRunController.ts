@@ -5,6 +5,16 @@ import { isCliAdapter, runtimeTypeForAdapter } from '../services/agents/CliAgent
 import { getCliRuntimeConfig } from '../services/CliRuntimeService'
 import { permissionProfile, PermissionProfileName } from '../services/agent-platform/types'
 
+export async function listAgentRuns(req: AuthenticatedRequest, res: Response) {
+  const runs = await prisma.cliRun.findMany({
+    where: { userId: req.userId! },
+    include: { agent: true, workspace: true, conversation: true },
+    orderBy: { updatedAt: 'desc' },
+    take: 50
+  })
+  res.json(runs.map(toRunResponse))
+}
+
 export async function createAgentRun(req: AuthenticatedRequest, res: Response) {
   const userId = req.userId!
   const agentId = String(req.body.agentId || '')
@@ -22,7 +32,6 @@ export async function createAgentRun(req: AuthenticatedRequest, res: Response) {
   }
   const runtime = await getCliRuntimeConfig(userId, runtimeTypeForAdapter(agent.adapterType))
   if (!runtime.enabled) return res.status(400).json({ error: `${runtime.displayName} is disabled` })
-  if (!runtime.apiKey) return res.status(400).json({ error: `${runtime.displayName} API key is not configured` })
 
   const run = await prisma.cliRun.create({
     data: {
@@ -56,6 +65,37 @@ export async function cancelAgentRun(req: AuthenticatedRequest, res: Response) {
   if (['completed', 'failed', 'cancelled'].includes(run.status)) return res.json(toRunResponse(run))
   const updated = await prisma.cliRun.update({ where: { id: run.id }, data: { status: 'cancelling', result: 'Cancellation requested' } })
   res.json(toRunResponse(updated))
+}
+
+export async function retryAgentRun(req: AuthenticatedRequest, res: Response) {
+  const previous = await prisma.cliRun.findFirst({ where: { id: req.params.runId, userId: req.userId! } })
+  if (!previous) return res.status(404).json({ error: 'Agent run not found' })
+  if (!['failed', 'cancelled'].includes(previous.status)) {
+    return res.status(400).json({ error: 'Only failed or cancelled Agent runs can be retried' })
+  }
+  const agent = await prisma.agent.findFirst({ where: { id: previous.agentId, OR: [{ isBuiltin: true }, { userId: req.userId! }] } })
+  if (!agent || !isCliAdapter(agent.adapterType)) return res.status(400).json({ error: 'Agent must be a Coding Agent Runtime adapter' })
+  const workspace = await prisma.workspace.findFirst({ where: { id: previous.workspaceId, userId: req.userId! } })
+  if (!workspace) return res.status(404).json({ error: 'Workspace not found' })
+  const runtime = await getCliRuntimeConfig(req.userId!, runtimeTypeForAdapter(agent.adapterType))
+  if (!runtime.enabled) return res.status(400).json({ error: `${runtime.displayName} is disabled` })
+  const previousMeta = parseRunMetadata(previous.result)
+  const retried = await prisma.cliRun.create({
+    data: {
+      userId: req.userId!,
+      agentId: previous.agentId,
+      workspaceId: previous.workspaceId,
+      conversationId: previous.conversationId,
+      prompt: previous.prompt,
+      result: JSON.stringify({
+        ...previousMeta,
+        source: 'agent-runs-retry',
+        retryOf: previous.id,
+        permissionProfile: normalizePermission(previousMeta.permissionProfile || runtime.permissionProfile)
+      })
+    }
+  })
+  res.status(201).json(toRunResponse(retried))
 }
 
 export async function streamAgentRunEvents(req: AuthenticatedRequest, res: Response) {
@@ -132,7 +172,7 @@ async function ensureAgentRunConversation(userId: string, agentId: string) {
 }
 
 function normalizePermission(value: unknown): PermissionProfileName {
-  return value === 'readonly' || value === 'autonomous' || value === 'safe_write' ? value : 'safe_write'
+  return value === 'readonly' ? value : 'safe_write'
 }
 
 export function permissionForRun(run: { result: string | null }) {
@@ -142,6 +182,10 @@ export function permissionForRun(run: { result: string | null }) {
   } catch {
     return permissionProfile('safe_write')
   }
+}
+
+function parseRunMetadata(value: string | null) {
+  try { return JSON.parse(value || '{}') as { mode?: string; permissionProfile?: PermissionProfileName; [key: string]: unknown } } catch { return {} }
 }
 
 function toRunResponse(run: any) {
@@ -163,7 +207,7 @@ function toRunResponse(run: any) {
 }
 
 function parseChanges(value: string) {
-  try { return JSON.parse(value || '[]') as Array<{ filePath: string; approvalId: string }> } catch { return [] }
+  try { return JSON.parse(value || '[]') as Array<{ filePath: string; approvalId: string; oldCode: string; newCode: string }> } catch { return [] }
 }
 
 function providerFromAdapter(_agentId: string) {

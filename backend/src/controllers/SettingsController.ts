@@ -52,8 +52,12 @@ export async function setProviderConfig(req: AuthenticatedRequest, res: Response
   if (!isProvider(provider)) return res.status(400).json({ error: 'Invalid provider' })
   const defaults = PROVIDER_DEFAULTS[provider]
   const apiKey = typeof req.body.apiKey === 'string' ? req.body.apiKey.trim() : ''
-  const previous = await prisma.providerConfig.findUnique({ where: { userId_providerType: { userId: req.userId!, providerType: provider } } })
-  if (!apiKey && !previous?.encryptedApiKey && !process.env[ENV_PROVIDER_KEYS[provider].apiKey]) return res.status(400).json({ error: 'apiKey is required for first configuration' })
+  const [previous, legacy] = await Promise.all([
+    prisma.providerConfig.findUnique({ where: { userId_providerType: { userId: req.userId!, providerType: provider } } }),
+    readLegacyKeys(req.userId!)
+  ])
+  const hasExistingKey = Boolean(previous?.encryptedApiKey || legacy[provider] || process.env[ENV_PROVIDER_KEYS[provider].apiKey])
+  if (!apiKey && !hasExistingKey) return res.status(400).json({ error: 'apiKey is required for first configuration' })
   const config = await prisma.providerConfig.upsert({
     where: { userId_providerType: { userId: req.userId!, providerType: provider } },
     update: {
@@ -71,7 +75,13 @@ export async function setProviderConfig(req: AuthenticatedRequest, res: Response
       encryptedApiKey: apiKey ? JSON.stringify(encryptSecret(apiKey)) : null
     }
   })
-  res.json({ providerType: config.providerType, displayName: config.displayName, baseURL: config.baseURL, defaultModel: config.defaultModel, configured: Boolean(config.encryptedApiKey) })
+  res.json({
+    providerType: config.providerType,
+    displayName: config.displayName,
+    baseURL: config.baseURL,
+    defaultModel: config.defaultModel,
+    configured: Boolean(config.encryptedApiKey || legacy[provider] || process.env[ENV_PROVIDER_KEYS[provider].apiKey])
+  })
 }
 
 export async function deleteProviderKey(req: AuthenticatedRequest, res: Response) {

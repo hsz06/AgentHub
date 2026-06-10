@@ -10,9 +10,11 @@
   },
   "dependencies": {
     "@ant-design/icons": "^6.2.3",
+    "@monaco-editor/react": "^4.7.0",
     "antd": "5.12.8",
     "browserslist": "^4.28.2",
     "caniuse-lite": "^1.0.30001793",
+    "monaco-editor": "^0.55.1",
     "react": "18.2.0",
     "react-dom": "18.2.0",
     "react-markdown": "9.0.1",

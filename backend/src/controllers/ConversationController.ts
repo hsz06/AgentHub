@@ -1,6 +1,8 @@
 import { Response } from 'express'
 import prisma from '../utils/prisma'
 import { AuthenticatedRequest } from '../middleware/auth'
+import { Orchestrator } from '../services/Orchestrator'
+import { getRealtimeServer } from '../services/RealtimeHub'
 
 const includeMembers = { members: { include: { agent: true } } }
 
@@ -83,4 +85,18 @@ export async function getOrchestrationRuns(req: AuthenticatedRequest, res: Respo
     take: 10
   })
   res.json(runs)
+}
+
+export async function retryOrchestrationTask(req: AuthenticatedRequest, res: Response) {
+  const conversation = await prisma.conversation.findFirst({ where: { id: req.params.id, userId: req.userId! } })
+  if (!conversation) return res.status(404).json({ error: 'Conversation not found' })
+  const io = getRealtimeServer()
+  if (!io) return res.status(503).json({ error: 'Realtime server unavailable' })
+
+  try {
+    const run = await Orchestrator.getInstance().retryTask(req.userId!, conversation.id, req.params.runId, req.params.taskId, io)
+    res.json(run)
+  } catch (error) {
+    res.status(400).json({ error: error instanceof Error ? error.message : 'Retry failed' })
+  }
 }

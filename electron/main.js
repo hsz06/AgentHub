@@ -27,6 +27,13 @@ ipcMain.handle('artifact:export', async (_event, { fileName, content }) => {
   return !result.canceled;
 });
 
+ipcMain.handle('text:export', async (_event, { fileName, content }) => {
+  const result = await dialog.showSaveDialog({ defaultPath: fileName });
+  if (!result.canceled && result.filePath) await fs.writeFile(result.filePath, content, 'utf8');
+  return !result.canceled;
+});
+
 ipcMain.on('deployment:notify', (_event, title) => new Notification({ title: 'AgentHub deployment', body: title }).show());
+ipcMain.on('agent-run:notify', (_event, title) => new Notification({ title: 'AgentHub Agent run', body: title }).show());
 app.whenReady().then(createWindow);
 app.on('window-all-closed', () => { if (process.platform !== 'darwin') app.quit(); });

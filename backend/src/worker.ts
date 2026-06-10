@@ -1,8 +1,12 @@
 import dotenv from 'dotenv'
+import fs from 'fs/promises'
+import os from 'os'
+import path from 'path'
 import prisma from './utils/prisma'
-import { executeApprovedDeployment } from './services/DockerSandboxExecutor'
+import { executeApprovedDeployment } from './services/LocalProcessExecutor'
 import { executeApprovedCommand } from './services/WorkspaceCommandService'
 import { executeNextCliRun } from './services/CliRunWorker'
+import { initializeDatabase } from './utils/prisma'
 
 dotenv.config()
 
@@ -33,9 +37,48 @@ async function poll() {
   await executeApprovedDeployment(deployment.id)
 }
 
-console.log('AgentHub deployment worker is running')
-setInterval(() => void poll().catch(error => console.error('Worker failure', error)), 2000)
-void poll()
+let polling = false
+
+async function pollOnce() {
+  if (polling) return
+  polling = true
+  try {
+    await poll()
+  } catch (error) {
+    console.error('Worker failure', error)
+  } finally {
+    polling = false
+  }
+}
+
+async function recoverInterruptedCliRuns() {
+  const interrupted = await prisma.cliRun.findMany({ where: { status: 'running' }, select: { id: true } })
+  if (!interrupted.length) return
+  await prisma.cliRun.updateMany({
+    where: { id: { in: interrupted.map(run => run.id) } },
+    data: { status: 'failed', result: 'Local execution worker restarted before the CLI run completed', completedAt: new Date() }
+  })
+  const tempEntries = await fs.readdir(os.tmpdir(), { withFileTypes: true })
+  await Promise.all(interrupted.flatMap(run =>
+    tempEntries
+      .filter(entry => entry.isDirectory() && entry.name.startsWith(`agenthub-cli-${run.id}-`))
+      .map(entry => fs.rm(path.join(os.tmpdir(), entry.name), { recursive: true, force: true }))
+  ))
+  console.warn(`Recovered ${interrupted.length} interrupted CLI run(s)`)
+}
+
+async function start() {
+  await initializeDatabase()
+  await recoverInterruptedCliRuns()
+  console.log('AgentHub local execution worker is running')
+  setInterval(() => void pollOnce(), 2000)
+  void pollOnce()
+}
+
+void start().catch(error => {
+  console.error('Worker startup failed', error)
+  process.exitCode = 1
+})
 
 async function finishCommandOrigin(userId: string, payload: { conversationId?: string; taskId?: string; runId?: string }, result: string, success: boolean) {
   if (payload.taskId) {
@@ -60,7 +103,7 @@ async function finishCommandOrigin(userId: string, payload: { conversationId?: s
     const waiting = await prisma.orchestrationTask.count({ where: { runId: payload.runId, status: 'waiting_approval' } })
     if (!waiting) await prisma.orchestrationRun.updateMany({
       where: { id: payload.runId, status: 'waiting_approval' },
-      data: { status: success ? 'completed' : 'completed_with_errors', completedAt: new Date() }
+      data: { result: result.slice(0, 8000) }
     })
   }
 }

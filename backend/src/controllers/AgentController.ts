@@ -2,6 +2,8 @@ import { Response } from 'express'
 import prisma from '../utils/prisma'
 import { AuthenticatedRequest } from '../middleware/auth'
 
+const supportedAdapterTypes = ['openai', 'claude', 'mimo', 'claude-code-cli', 'codex-cli', 'opencode-cli']
+
 export async function getAgents(req: AuthenticatedRequest, res: Response) {
   const agents = await prisma.agent.findMany({
     where: { OR: [{ isBuiltin: true }, { userId: req.userId! }] },
@@ -20,7 +22,7 @@ export async function getAgentById(req: AuthenticatedRequest, res: Response) {
 
 export async function createAgent(req: AuthenticatedRequest, res: Response) {
   const { name, avatar, description, capabilities, systemPrompt, adapterType, model, tools } = req.body
-  if (!name || !['openai', 'claude', 'mimo', 'claude-code-cli', 'codex-cli', 'opencode-cli'].includes(adapterType)) {
+  if (!name || !supportedAdapterTypes.includes(adapterType)) {
     return res.status(400).json({ error: 'name and supported adapterType are required' })
   }
   const newAgent = await prisma.agent.create({
@@ -43,7 +45,10 @@ export async function createAgent(req: AuthenticatedRequest, res: Response) {
 export async function updateAgent(req: AuthenticatedRequest, res: Response) {
   const existing = await prisma.agent.findFirst({ where: { id: req.params.id, userId: req.userId!, isBuiltin: false } })
   if (!existing) return res.status(404).json({ error: 'Editable Agent not found' })
-  const { name, avatar, description, capabilities, systemPrompt, model, tools } = req.body
+  const { name, avatar, description, capabilities, systemPrompt, adapterType, model, tools } = req.body
+  if (adapterType !== undefined && !supportedAdapterTypes.includes(adapterType)) {
+    return res.status(400).json({ error: 'supported adapterType is required' })
+  }
   const updatedAgent = await prisma.agent.update({
     where: { id: existing.id },
     data: {
@@ -52,6 +57,7 @@ export async function updateAgent(req: AuthenticatedRequest, res: Response) {
       ...(description !== undefined && { description }),
       ...(capabilities !== undefined && { capabilities: JSON.stringify(capabilities) }),
       ...(systemPrompt !== undefined && { systemPrompt }),
+      ...(adapterType !== undefined && { adapterType }),
       ...(model !== undefined && { model }),
       ...(tools !== undefined && { tools: JSON.stringify(tools) })
     }

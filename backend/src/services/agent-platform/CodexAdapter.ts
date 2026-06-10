@@ -1,24 +1,17 @@
 import { AgentAdapter, AgentEvent, AgentRunRequest } from './types'
-import { parseJsonLines, renderTemplate, shellQuote } from './utils'
+import { parseJsonLines } from './utils'
 
 export class CodexAdapter implements AgentAdapter {
   provider = 'codex' as const
 
-  buildCommand(request: AgentRunRequest, runtime: { dockerImage: string; commandTemplate: string; envVarName: string; apiKey: string }) {
+  buildCommand(request: AgentRunRequest, runtime: { executablePath: string; envVarName: string; apiKey?: string }) {
     const sandbox = request.permissions.filesystem === 'workspace_write' ? 'workspace-write' : 'read-only'
-    const command = runtime.commandTemplate.includes('{{task}}')
-      ? renderTemplate(runtime.commandTemplate, {
-        task: shellQuote(request.task),
-        promptFile: '/workspace/.agenthub/prompt.txt',
-        sandbox,
-        model: request.model
-      })
-      : runtime.commandTemplate
+    const env: Record<string, string> = {}
+    if (runtime.apiKey) env.OPENAI_API_KEY = runtime.apiKey
     return {
-      image: runtime.dockerImage,
-      command,
-      env: { [runtime.envVarName]: runtime.apiKey, OPENAI_API_KEY: runtime.apiKey },
-      network: request.permissions.network === 'deny' ? 'none' as const : 'bridge' as const
+      executablePath: runtime.executablePath,
+      args: ['exec', '--cd', request.workspace.path, '--json', '--sandbox', sandbox, request.task],
+      env
     }
   }
 

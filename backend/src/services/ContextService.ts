@@ -18,14 +18,19 @@ export async function buildContext(conversationId: string, agent: Agent): Promis
   }
   if (conversation?.summary) systemParts.push(`Earlier conversation summary:\n${conversation.summary}`)
   if (pinned.length) systemParts.push(`Pinned long-term context:\n${pinned.map(formatStored).join('\n')}`)
+  const artifactContext = await loadArtifactContext(conversationId)
+  if (artifactContext) systemParts.push(`Relevant artifacts in this conversation:\n${artifactContext}`)
 
   const messages: Message[] = [
     { role: 'system', content: systemParts.join('\n\n') },
     ...ordinary.map(toMessage)
   ]
   const manager = AgentManager.getInstance()
-  const budget = manager.getTokenManager().getModelMaxTokens(agent.model || defaultModel(agent.adapterType))
-  const truncated = manager.getTokenManager().truncateMessagesToFit(messages, budget, 4096)
+  const budget = agent.adapterType.endsWith('-cli')
+    ? 128000
+    : manager.getTokenManager().getModelMaxTokens(agent.model || defaultModel(agent.adapterType))
+  const reservedOutputTokens = Math.min(4096, Math.max(512, Math.floor(budget / 4)))
+  const truncated = manager.getTokenManager().truncateMessagesToFit(messages, budget, reservedOutputTokens)
   if (truncated.length < messages.length && ordinary.length > 4) {
     const removedCount = messages.length - truncated.length
     const removed = ordinary.slice(0, removedCount)
@@ -54,4 +59,61 @@ function toMessage(message: StoredMessage): Message {
 
 function parseTools(value: string) {
   try { return JSON.parse(value || '[]') as string[] } catch { return [] }
+}
+
+async function loadArtifactContext(conversationId: string) {
+  const artifacts = await prisma.artifact.findMany({
+    where: {
+      OR: [
+        { versions: { some: { message: { conversationId } } } },
+        { workspace: { is: { conversationId } } }
+      ]
+    },
+    include: { versions: { orderBy: { version: 'desc' }, take: 1 } },
+    orderBy: { updatedAt: 'desc' },
+    take: 8
+  })
+  return artifacts
+    .map(artifact => summarizeArtifact({
+      name: artifact.name,
+      type: artifact.type,
+      mimeType: artifact.mimeType,
+      version: artifact.versions[0]?.version,
+      content: artifact.versions[0]?.content || '',
+      metadata: artifact.versions[0]?.metadata || '{}'
+    }))
+    .filter(Boolean)
+    .join('\n\n')
+}
+
+function summarizeArtifact(artifact: { name: string; type: string; mimeType: string | null; version?: number; content: string; metadata: string }) {
+  const header = `- ${artifact.name} (${artifact.type}, v${artifact.version || 1}${artifact.mimeType ? `, ${artifact.mimeType}` : ''})`
+  if (!artifact.content) return `${header}: empty`
+  let metadata: { encoding?: string } = {}
+  try { metadata = JSON.parse(artifact.metadata || '{}') } catch { metadata = {} }
+  if (metadata.encoding === 'base64' || artifact.content.startsWith('data:')) {
+    return `${header}: binary or encoded content, ${artifact.content.length} characters`
+  }
+  if (artifact.type === 'slides') {
+    const slides = summarizeSlides(artifact.content)
+    return `${header}:\n${slides || truncateArtifactContent(artifact.content)}`
+  }
+  return `${header}:\n${truncateArtifactContent(artifact.content)}`
+}
+
+function summarizeSlides(content: string) {
+  try {
+    const parsed = JSON.parse(content) as { slides?: Array<{ title?: string; body?: string }> }
+    return (parsed.slides || []).slice(0, 6).map((slide, index) => {
+      const body = slide.body ? ` — ${slide.body.replace(/\s+/g, ' ').slice(0, 160)}` : ''
+      return `  ${index + 1}. ${slide.title || 'Untitled'}${body}`
+    }).join('\n')
+  } catch {
+    return ''
+  }
+}
+
+function truncateArtifactContent(content: string) {
+  const compact = content.replace(/\r\n/g, '\n').trim()
+  return compact.length > 1800 ? `${compact.slice(0, 1800)}\n...[truncated]` : compact
 }

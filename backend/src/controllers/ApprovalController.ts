@@ -68,7 +68,7 @@ export async function resolveApproval(req: AuthenticatedRequest, res: Response) 
       if (!approval.workspaceId || !payload.command) throw new Error('Command payload is incomplete')
       const queued = await prisma.toolApproval.update({
         where: { id: approval.id },
-        data: { status: 'queued', resolvedAt: new Date(), result: 'Command queued for Docker worker execution' }
+        data: { status: 'queued', resolvedAt: new Date(), result: 'Command queued for local worker execution' }
       })
       await recordToolOutcome(req.userId!, origin, approval.title, queued.result || 'Command queued', true, false)
       emitToUser(req.userId!, 'tool:result', queued)
@@ -76,14 +76,19 @@ export async function resolveApproval(req: AuthenticatedRequest, res: Response) 
     }
     if (approval.deploymentId) {
       const deployment = await prisma.deployment.findUniqueOrThrow({ where: { id: approval.deploymentId } })
-      await prisma.deployment.update({
+      const updatedDeployment = await prisma.deployment.update({
         where: { id: deployment.id },
         data: deployment.type === 'static'
           ? { status: 'success', previewUrl: `/api/deployments/${deployment.id}/preview?token=${encodeURIComponent(issuePreviewToken(req.userId!, deployment.id))}` }
           : { status: 'queued' }
       })
-      result = deployment.type === 'static' ? 'Static preview published' : 'Deployment queued for Docker worker'
-      emitToUser(req.userId!, 'deployment:state', { deploymentId: deployment.id, status: deployment.type === 'static' ? 'success' : 'queued' })
+      result = deployment.type === 'static' ? 'Static preview published' : 'Deployment queued for local worker'
+      emitToUser(req.userId!, 'deployment:state', {
+        deploymentId: deployment.id,
+        status: updatedDeployment.status,
+        previewUrl: updatedDeployment.previewUrl,
+        type: updatedDeployment.type
+      })
     }
     const approved = await prisma.toolApproval.update({ where: { id: approval.id }, data: { status: 'approved', resolvedAt: new Date(), result } })
     await recordToolOutcome(req.userId!, origin, approval.title, result, true)

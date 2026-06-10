@@ -13,6 +13,18 @@ interface PlannedTask {
   dependencies: string[]
 }
 
+function parseRunState(value: string): { plan: PlannedTask[]; taskIdsByKey: Record<string, string> } {
+  try {
+    const parsed = JSON.parse(value || '{}') as { plan?: PlannedTask[]; taskIdsByKey?: Record<string, string> }
+    return {
+      plan: Array.isArray(parsed.plan) ? parsed.plan : [],
+      taskIdsByKey: parsed.taskIdsByKey || {}
+    }
+  } catch {
+    return { plan: [], taskIdsByKey: {} }
+  }
+}
+
 export class Orchestrator {
   private static instance: Orchestrator
   private manager = AgentManager.getInstance()
@@ -37,9 +49,24 @@ export class Orchestrator {
       include: { members: { include: { agent: true } }, messages: { where: { senderType: 'user' }, orderBy: { createdAt: 'desc' }, take: 1 } }
     })
     if (!conversation) throw new Error('Conversation not found')
-    const agents = mentionedAgentIds.length
-      ? conversation.members.map(member => member.agent).filter(agent => mentionedAgentIds.includes(agent.id))
-      : conversation.members.map(member => member.agent)
+    let agents = conversation.members.map(member => member.agent)
+    if (mentionedAgentIds.length) {
+      const mentionedAgents = await prisma.agent.findMany({
+        where: { id: { in: mentionedAgentIds }, OR: [{ isBuiltin: true }, { userId }] }
+      })
+      const existingMemberIds = new Set(conversation.members.map(member => member.agentId))
+      await Promise.all(mentionedAgents
+        .filter(agent => !existingMemberIds.has(agent.id))
+        .map(agent => prisma.conversationMember.create({
+          data: { conversationId, agentId: agent.id }
+        }).catch(() => null)))
+      const updatedConversation = await prisma.conversation.findUnique({
+        where: { id: conversationId },
+        include: { members: { include: { agent: true } } }
+      })
+      if (updatedConversation) io.to(`conversation:${conversationId}`).emit('conversation:updated', updatedConversation)
+      agents = mentionedAgents
+    }
     if (!agents.length) throw new Error('No addressed agents in this conversation')
     const request = conversation.messages[0]?.content || 'Collaborate on the latest user request.'
     const run = await prisma.orchestrationRun.create({
@@ -73,9 +100,14 @@ export class Orchestrator {
         const key = ready[index].key
         remaining.delete(key)
         if (result.status === 'failed') failed.add(key)
-        else completed.set(key, result.output)
-        if (result.status === 'waiting_approval') waitingApproval = true
+        else if (result.status === 'waiting_approval') {
+          remaining.add(key)
+          waitingApproval = true
+        } else {
+          completed.set(key, result.output)
+        }
       })
+      if (waitingApproval) break
     }
     if (this.cancelled.delete(run.id)) {
       io.to(room).emit('orchestration:state', { runId: run.id, status: 'cancelled' })
@@ -140,7 +172,11 @@ export class Orchestrator {
       let output = await runtime.streamChat(context, chunk => {
         if (!this.cancelled.has(runId)) io.to(room).emit('message:chunk', { messageId: placeholder.id, conversationId, chunk })
       }, { model: agent.model || undefined, conversationId, workspaceId: workspace?.id, agentId: agent.id, messageId: placeholder.id })
-      if (this.cancelled.has(runId)) return { status: 'cancelled', output: '' }
+      if (this.cancelled.has(runId)) {
+        await prisma.orchestrationTask.update({ where: { id: task.id }, data: { status: 'cancelled', completedAt: new Date() } })
+        io.to(room).emit('task:state', { runId, taskId: task.id, agentId: agent.id, title: task.title, status: 'cancelled' })
+        return { status: 'cancelled', output: '' }
+      }
       const allowedTools = JSON.parse(agent.tools || '[]') as string[]
       const readResult = await executeReadToolRequests(userId, output, allowedTools)
       if (readResult) {
@@ -178,9 +214,156 @@ export class Orchestrator {
     if (!run || run.status !== 'waiting_approval') return
     const waiting = run.tasks.filter(task => task.status === 'waiting_approval')
     if (waiting.length) return
-    const outputs = new Map(run.tasks.filter(task => task.output).map(task => [task.id, task.output!]))
-    const failed = new Set(run.tasks.filter(task => task.status === 'failed').map(task => task.id))
-    await this.summarize(userId, run.conversationId, run.id, run.conversation.members[0].agent, outputs, failed, io)
+    const state = parseRunState(run.state)
+    const planned = state.plan
+    const taskIdsByKey = new Map(Object.entries(state.taskIdsByKey))
+    if (!planned.length || !taskIdsByKey.size) {
+      const outputs = new Map(run.tasks.filter(task => task.output).map(task => [task.id, task.output!]))
+      const failed = new Set(run.tasks.filter(task => task.status === 'failed').map(task => task.id))
+      await this.summarize(userId, run.conversationId, run.id, run.conversation.members[0].agent, outputs, failed, io)
+      return
+    }
+
+    await prisma.orchestrationRun.update({ where: { id: run.id }, data: { status: 'running' } })
+    io.to(`conversation:${run.conversationId}`).emit('orchestration:state', { runId: run.id, status: 'running' })
+
+    const taskById = new Map(run.tasks.map(task => [task.id, task]))
+    const completed = new Map<string, string>()
+    const failed = new Set<string>()
+    for (const plan of planned) {
+      const task = taskById.get(taskIdsByKey.get(plan.key) || '')
+      if (task?.status === 'completed') completed.set(plan.key, task.output || '')
+      if (task?.status === 'failed') failed.add(plan.key)
+    }
+    const remaining = new Set(planned
+      .filter(plan => {
+        const task = taskById.get(taskIdsByKey.get(plan.key) || '')
+        return task?.status === 'pending'
+      })
+      .map(plan => plan.key))
+    let waitingApproval = false
+    while (remaining.size && !this.cancelled.has(run.id)) {
+      const ready = planned.filter(task => remaining.has(task.key) && task.dependencies.every(dependency => completed.has(dependency) || failed.has(dependency)))
+      if (!ready.length) {
+        for (const key of remaining) failed.add(key)
+        break
+      }
+      const results = await Promise.all(ready.map(task => this.executeTask(userId, run.conversationId, run.id, taskIdsByKey.get(task.key)!, task, run.conversation.members.map(member => member.agent), completed, io)))
+      results.forEach((result, index) => {
+        const key = ready[index].key
+        remaining.delete(key)
+        if (result.status === 'failed') failed.add(key)
+        else if (result.status === 'waiting_approval') {
+          remaining.add(key)
+          waitingApproval = true
+        } else {
+          completed.set(key, result.output)
+        }
+      })
+      if (waitingApproval) break
+    }
+    if (waitingApproval) {
+      await prisma.orchestrationRun.update({ where: { id: run.id }, data: { status: 'waiting_approval', result: Array.from(completed.values()).join('\n\n') } })
+      io.to(`conversation:${run.conversationId}`).emit('orchestration:state', { runId: run.id, status: 'waiting_approval' })
+      return
+    }
+    await this.summarize(userId, run.conversationId, run.id, run.conversation.members[0].agent, completed, failed, io)
+  }
+
+  async resumeReadyRuns(io: Server, limit = 5) {
+    const runs = await prisma.orchestrationRun.findMany({
+      where: { status: 'waiting_approval' },
+      include: { tasks: true },
+      orderBy: { updatedAt: 'asc' },
+      take: limit
+    })
+    for (const run of runs) {
+      if (run.tasks.some(task => task.status === 'waiting_approval')) continue
+      await this.resumeAfterApproval(run.userId, run.id, io)
+    }
+  }
+
+  async retryTask(userId: string, conversationId: string, runId: string, taskId: string, io: Server) {
+    const run = await prisma.orchestrationRun.findFirst({
+      where: { id: runId, userId, conversationId },
+      include: {
+        conversation: { include: { members: { include: { agent: true } } } },
+        tasks: { orderBy: { createdAt: 'asc' } }
+      }
+    })
+    if (!run) throw new Error('Orchestration run not found')
+
+    const task = run.tasks.find(item => item.id === taskId)
+    if (!task) throw new Error('Task not found')
+    if (!['failed', 'cancelled'].includes(task.status)) {
+      throw new Error('Only failed or cancelled tasks can be retried')
+    }
+
+    const state = parseRunState(run.state)
+    const stateEntry = Object.entries(state.taskIdsByKey).find(([, id]) => id === task.id)
+    const plannedTask = stateEntry ? state.plan.find(item => item.key === stateEntry[0]) : undefined
+    const fallbackAgentId = task.agentId || run.conversation.members[0]?.agent.id
+    if (!fallbackAgentId && !plannedTask?.agentId) throw new Error('Task has no Agent')
+
+    const plan: PlannedTask = plannedTask || {
+      key: task.id,
+      title: task.title,
+      agentId: fallbackAgentId!,
+      input: task.input,
+      dependencies: []
+    }
+    const agents = run.conversation.members.map(member => member.agent)
+    if (!agents.some(agent => agent.id === plan.agentId)) {
+      throw new Error('Task Agent is not in the conversation')
+    }
+
+    await prisma.orchestrationRun.update({
+      where: { id: run.id },
+      data: { status: 'running', completedAt: null }
+    })
+    await prisma.orchestrationTask.update({
+      where: { id: task.id },
+      data: { status: 'pending', output: null, startedAt: null, completedAt: null }
+    })
+    io.to(`conversation:${conversationId}`).emit('orchestration:state', { runId: run.id, status: 'running' })
+
+    const planned = state.plan.length ? state.plan : [plan]
+    const taskIdsByKey = state.plan.length ? state.taskIdsByKey : { [plan.key]: task.id }
+    const outputs = new Map<string, string>()
+    for (const item of planned) {
+      const existing = run.tasks.find(row => row.id === taskIdsByKey[item.key])
+      if (existing?.status === 'completed' && existing.output) outputs.set(item.key, existing.output)
+    }
+
+    const result = await this.executeTask(userId, conversationId, run.id, task.id, plan, agents, outputs, io)
+    if (result.status === 'waiting_approval') {
+      const updated = await prisma.orchestrationRun.update({
+        where: { id: run.id },
+        data: { status: 'waiting_approval', result: Array.from(outputs.values()).join('\n\n') },
+        include: { tasks: { orderBy: { createdAt: 'asc' } } }
+      })
+      io.to(`conversation:${conversationId}`).emit('orchestration:state', { runId: run.id, status: 'waiting_approval' })
+      return updated
+    }
+
+    const freshTasks = await prisma.orchestrationTask.findMany({
+      where: { runId: run.id },
+      orderBy: { createdAt: 'asc' }
+    })
+    const taskById = new Map(freshTasks.map(item => [item.id, item]))
+    const completed = new Map<string, string>()
+    const failed = new Set<string>()
+    for (const item of planned) {
+      const current = taskById.get(taskIdsByKey[item.key])
+      if (current?.status === 'completed') completed.set(item.key, current.output || '')
+      if (['failed', 'cancelled'].includes(current?.status || '')) failed.add(item.key)
+    }
+
+    await this.summarize(userId, conversationId, run.id, run.conversation.members[0].agent, completed, failed, io)
+    return prisma.orchestrationRun.findUniqueOrThrow({
+      where: { id: run.id },
+      include: { tasks: { orderBy: { createdAt: 'asc' } } }
+    })
   }
 
   private async summarize(userId: string, conversationId: string, runId: string, agent: Agent, completed: Map<string, string>, failed: Set<string>, io: Server) {

@@ -4,12 +4,11 @@ import fs from 'fs/promises'
 import os from 'os'
 import path from 'path'
 import prisma from '../utils/prisma'
-import { getCliRuntimeConfig } from './CliRuntimeService'
+import { ensureLocalExecutionEnabled, getCliRuntimeConfig, localProcessEnv } from './CliRuntimeService'
 import { runtimeTypeForAdapter } from './agents/CliAgent'
 import { agentAdapterRegistry } from './agent-platform/AgentAdapterRegistry'
 import { AgentProvider, AgentRunRequest, permissionProfile, PermissionProfileName } from './agent-platform/types'
 import { eventsToText } from './agent-platform/utils'
-import { emitToConversation } from './RealtimeHub'
 const IGNORED_PARTS = new Set(['.git', 'node_modules', '.agenthub'])
 
 interface SnapshotEntry {
@@ -33,8 +32,7 @@ export async function executeNextCliRun() {
     const runtimeType = runtimeTypeForAdapter(run.agent.adapterType)
     const config = await getCliRuntimeConfig(run.userId, runtimeType)
     if (!config.enabled) throw new Error(`${config.displayName} is disabled`)
-    if (!config.apiKey) throw new Error(`${config.displayName} API key is not configured`)
-    if (process.env.SANDBOX_EXECUTION_ENABLED !== 'true') throw new Error('Docker sandbox execution is disabled')
+    ensureLocalExecutionEnabled()
 
     await fs.cp(run.workspace.rootPath, tempRoot, { recursive: true, force: true })
     const baseSnapshot = await snapshotFiles(tempRoot)
@@ -50,23 +48,15 @@ export async function executeNextCliRun() {
       provider,
       task: run.prompt,
       mode: 'patch',
-      workspace: { path: '/workspace' },
+      workspace: { path: tempRoot },
       permissions: profile,
       model: run.agent.model || undefined,
       limits: { timeoutSec: Math.ceil(Number(process.env.CLI_AGENT_RUN_TIMEOUT_MS || 300000) / 1000), maxTurns: 10 }
     }
     const runner = adapter.buildCommand(request, { ...config, apiKey: config.apiKey })
-    await appendCliOutput(run.id, 'stdout', `Agent runtime: ${provider}\nCommand started in sandbox.\n`, run.conversationId, run.messageId || undefined)
-    const { stdout, stderr } = await runDockerStreaming(run.id, [
-      'run', '--rm', '--cpus', '1', '--memory', '768m', '--pids-limit', '128',
-      '--security-opt', 'no-new-privileges',
-      '--network', runner.network,
-      ...Object.entries(runner.env).flatMap(([key, value]) => ['-e', `${key}=${value}`]),
-      '-v', `${tempRoot}:/workspace`,
-      '-w', '/workspace',
-      runner.image,
-      'sh', '-lc', runner.command
-    ], adapter, request.runId, run.conversationId, run.messageId || undefined)
+    const { stdout, stderr } = await runLocalStreaming(run.id, runner.executablePath, runner.args, runner.env, tempRoot, adapter, request.runId)
+    const current = await prisma.cliRun.findUnique({ where: { id: run.id }, select: { status: true } })
+    if (current?.status === 'cancelled') return true
 
     const nextSnapshot = await snapshotFiles(tempRoot)
     const changes = await createApprovalsForChanges(run, baseSnapshot, nextSnapshot)
@@ -109,27 +99,59 @@ function providerForRuntime(runtimeType: string): AgentProvider {
   throw new Error(`Unsupported runtime type: ${runtimeType}`)
 }
 
-async function runDockerStreaming(runId: string, args: string[], adapter: { normalizeStdout(text: string, runId: string): unknown[]; normalizeStderr(text: string, runId: string): unknown[] }, agentRunId: string, conversationId?: string, messageId?: string) {
+async function runLocalStreaming(runId: string, executablePath: string, args: string[], env: Record<string, string>, cwd: string, adapter: { normalizeStdout(text: string, runId: string): unknown[]; normalizeStderr(text: string, runId: string): unknown[] }, agentRunId: string) {
   return new Promise<{ stdout: string; stderr: string }>((resolve, reject) => {
-    const proc = spawn('docker', args, { windowsHide: true })
+    const proc = spawn(executablePath, args, { cwd, env: localProcessEnv(executablePath, env), windowsHide: true, stdio: ['ignore', 'pipe', 'pipe'] })
     let stdout = ''
     let stderr = ''
-    const timer = setTimeout(() => {
+    let stdoutBuffer = ''
+    let stderrBuffer = ''
+    let persistTimer: NodeJS.Timeout | undefined
+    let persistChain = Promise.resolve()
+    let settled = false
+    const rejectOnce = (error: unknown) => {
+      if (settled) return
+      settled = true
       proc.kill('SIGKILL')
-      reject(new Error('CLI run timed out'))
+      reject(error)
+    }
+    const persist = () => {
+      persistTimer = undefined
+      const nextStdout = stdout
+      const nextStderr = stderr
+      persistChain = persistChain
+        .then(() => persistCliOutput(runId, nextStdout, nextStderr))
+        .catch(rejectOnce)
+    }
+    const schedulePersist = () => {
+      if (!persistTimer) persistTimer = setTimeout(persist, 1000)
+    }
+    const flushPersist = async () => {
+      if (persistTimer) {
+        clearTimeout(persistTimer)
+        persist()
+      }
+      await persistChain
+    }
+    const timer = setTimeout(() => {
+      rejectOnce(new Error('CLI run timed out'))
     }, Number(process.env.CLI_AGENT_RUN_TIMEOUT_MS || 300000))
 
     proc.stdout.on('data', data => {
-      const raw = String(data)
-      const text = eventsToText(adapter.normalizeStdout(raw, agentRunId) as any) || raw
+      stdoutBuffer += String(data)
+      const lines = takeCompleteLines(stdoutBuffer)
+      stdoutBuffer = lines.remainder
+      const text = eventsToText(adapter.normalizeStdout(lines.complete, agentRunId) as any)
       stdout += text
-      void appendCliOutput(runId, 'stdout', text, conversationId, messageId)
+      schedulePersist()
     })
     proc.stderr.on('data', data => {
-      const raw = String(data)
-      const text = eventsToText(adapter.normalizeStderr(raw, agentRunId) as any) || raw
+      stderrBuffer += String(data)
+      const lines = takeCompleteLines(stderrBuffer)
+      stderrBuffer = lines.remainder
+      const text = eventsToText(adapter.normalizeStderr(lines.complete, agentRunId) as any)
       stderr += text
-      void appendCliOutput(runId, 'stderr', text, conversationId, messageId)
+      schedulePersist()
     })
     const cancelTimer = setInterval(async () => {
       const current = await prisma.cliRun.findUnique({ where: { id: runId }, select: { status: true } })
@@ -141,28 +163,41 @@ async function runDockerStreaming(runId: string, args: string[], adapter: { norm
     proc.on('error', error => {
       clearTimeout(timer)
       clearInterval(cancelTimer)
-      reject(error)
+      rejectOnce(error)
     })
-    proc.on('close', code => {
+    proc.on('close', async code => {
       clearTimeout(timer)
       clearInterval(cancelTimer)
-      prisma.cliRun.findUnique({ where: { id: runId }, select: { status: true } }).then(current => {
+      const trailingStdout = eventsToText(adapter.normalizeStdout(stdoutBuffer, agentRunId) as any)
+      const trailingStderr = eventsToText(adapter.normalizeStderr(stderrBuffer, agentRunId) as any)
+      stdout += trailingStdout
+      stderr += trailingStderr
+      try {
+        await flushPersist()
+        const current = await prisma.cliRun.findUnique({ where: { id: runId }, select: { status: true } })
+        if (settled) return
+        settled = true
         if (current?.status === 'cancelled') resolve({ stdout, stderr })
         else if (code === 0) resolve({ stdout, stderr })
         else reject(new Error(`Agent runtime exited with code ${code}\n${stderr || stdout}`))
-      }).catch(reject)
+      } catch (error) {
+        rejectOnce(error)
+      }
     })
   })
 }
 
-async function appendCliOutput(runId: string, stream: 'stdout' | 'stderr', chunk: string, conversationId?: string, messageId?: string) {
-  if (!chunk) return
-  const run = await prisma.cliRun.findUnique({ where: { id: runId } })
-  if (!run) return
-  const field = stream === 'stdout' ? 'stdout' : 'stderr'
-  const current = stream === 'stdout' ? run.stdout : run.stderr
-  await prisma.cliRun.update({ where: { id: runId }, data: { [field]: `${current}${chunk}`.slice(-60000) } })
-  if (conversationId && messageId) emitToConversation(conversationId, 'message:chunk', { conversationId, messageId, chunk })
+async function persistCliOutput(runId: string, stdout: string, stderr: string) {
+  await prisma.cliRun.update({
+    where: { id: runId },
+    data: { stdout: stdout.slice(-60000), stderr: stderr.slice(-20000) }
+  })
+}
+
+function takeCompleteLines(value: string) {
+  const lastBreak = value.lastIndexOf('\n')
+  if (lastBreak < 0) return { complete: '', remainder: value }
+  return { complete: value.slice(0, lastBreak + 1), remainder: value.slice(lastBreak + 1) }
 }
 
 function readPermissionProfile(result: string | null, fallback?: string): PermissionProfileName {
@@ -198,7 +233,7 @@ async function snapshotFiles(root: string) {
 }
 
 async function createApprovalsForChanges(run: { id: string; userId: string; workspaceId: string; conversationId: string; agentId: string }, before: Snapshot, after: Snapshot) {
-  const changes: Array<{ filePath: string; approvalId: string }> = []
+  const changes: Array<{ filePath: string; approvalId: string; oldCode: string; newCode: string }> = []
   for (const [filePath, next] of Object.entries(after)) {
     const previous = before[filePath]
     if (previous?.hash === next.hash) continue
@@ -212,13 +247,14 @@ async function createApprovalsForChanges(run: { id: string; userId: string; work
           filePath,
           baseHash: previous?.hash,
           content: next.content,
+          oldContent: previous?.content || '',
           conversationId: run.conversationId,
           agentId: run.agentId,
           cliRunId: run.id
         })
       }
     })
-    changes.push({ filePath, approvalId: approval.id })
+    changes.push({ filePath, approvalId: approval.id, oldCode: previous?.content || '', newCode: next.content })
   }
   return changes
 }
